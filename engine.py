@@ -111,8 +111,12 @@ def can_hu(hand, melds=None, que=None):
     return False, "牌型不成"
 
 
-def hu_score(hand, melds, que):
-    """返回 (ok, {'type':..,'fan':..,'flags':[..]})。只有平胡/七对/清一色三档。"""
+def hu_score(hand, melds, que, *, gang_count=0, self_draw=False):
+    """按神庭麻将馆规计分，返回 (ok, {'type', 'fan', 'flags'}).
+
+    馆规（倍率相乘）：平胡×1、清一色×2、七对×2、每根杠×2，
+    自摸×2，不设封顶。胡牌判定仍完全委托给 ``can_hu``。
+    """
     ok, typ = can_hu(hand, melds, que)
     if not ok:
         return False, {"type": typ, "fan": 0, "flags": []}
@@ -122,6 +126,12 @@ def hu_score(hand, melds, que):
     if len(set(t[1] for t in allt)) == 1:
         fan *= 2
         flags.append("清一色")
+    for _ in range(max(0, int(gang_count))):
+        fan *= 2
+        flags.append("杠")
+    if self_draw:
+        fan *= 2
+        flags.append("自摸")
     return True, {"type": typ, "fan": fan, "flags": flags}
 
 
@@ -224,7 +234,8 @@ def available_actions(g, seat):
             acts.append({"action": "pass"})
         return acts
     if g["step"] == "discard" and g["turn"] == seat:
-        ok, info = hu_score(p["hand"], p["melds"], p["que"])
+        ok, info = hu_score(p["hand"], p["melds"], p["que"],
+                            gang_count=p["gang_count"], self_draw=True)
         if ok:
             acts.append({"action": "hu", "note": "/".join(info["flags"])})
         gs = self_gang_options(p)
@@ -282,7 +293,8 @@ def act(g, seat, action, tile=None):
         return g
 
     if action == "hu":
-        ok, info = hu_score(p["hand"], p["melds"], p["que"])
+        ok, info = hu_score(p["hand"], p["melds"], p["que"],
+                            gang_count=p["gang_count"], self_draw=True)
         if not ok:
             raise MJError("胡不了：" + info["type"])
         g["hu_seq"] += 1
@@ -374,7 +386,8 @@ def _resolve_claim(g):
         # 一炮多响：都算胡（血战到底不散桌）
         for s in sorted(hus):
             p = g["players"][s]
-            ok, info = hu_score(p["hand"] + [tile], p["melds"], p["que"])
+            ok, info = hu_score(p["hand"] + [tile], p["melds"], p["que"],
+                                gang_count=p["gang_count"], self_draw=False)
             if not ok:
                 continue
             g["hu_seq"] += 1
@@ -449,7 +462,8 @@ def _draw_to(g, seat):
     g["step"] = "discard"
     g["log"].append(f"{p['name']} 摸牌（墙剩 {len(g['deck'])}）")
     if not g["deck"]:
-        ok, _ = hu_score(p["hand"], p["melds"], p["que"])
+        ok, _ = hu_score(p["hand"], p["melds"], p["que"],
+                         gang_count=p["gang_count"], self_draw=True)
         if not ok:
             return _end(g, "牌墙摸完，流局")
 
