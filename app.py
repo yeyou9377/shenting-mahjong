@@ -20,6 +20,8 @@ import os
 import secrets
 import sqlite3
 import threading
+import time
+import hmac
 from datetime import datetime, timezone, timedelta
 
 from flask import Flask, request, jsonify, abort, Response, send_from_directory
@@ -31,6 +33,10 @@ DB_PATH = os.path.join(APP_DIR, "majiang.db")
 CST = timezone(timedelta(hours=8))
 LOCK = threading.Lock()
 MELD_NAME = {"peng": "碰", "gang_ming": "明杠", "gang_an": "暗杠", "gang_bu": "补杠"}
+PLAYER_TIMEOUT_SEC = int(os.environ.get("MJ_PLAYER_TIMEOUT_SEC", "45"))
+CREATE_WINDOW_SEC = 60
+CREATE_LIMIT = int(os.environ.get("MJ_CREATE_LIMIT", "8"))
+CREATE_ATTEMPTS = {}
 
 app = Flask(__name__)
 
@@ -56,6 +62,59 @@ def init_db():
             );
             """
         )
+
+
+def create_key_configured():
+    return bool(os.environ.get("MJ_CREATE_KEY"))
+
+
+def check_create_permission(req):
+    """Production can require MJ_CREATE_KEY; local dev remains frictionless."""
+    key = os.environ.get("MJ_CREATE_KEY")
+    if key:
+        supplied = req.headers.get("X-MJ-Create-Key") or (req.get_json(silent=True) or {}).get("create_key", "")
+        if not supplied or not hmac.compare_digest(str(supplied), key):
+            return False, "建桌需要有效的创建密钥"
+    ip = req.headers.get("X-Forwarded-For", req.remote_addr or "-").split(",")[0].strip()
+    now_ts = time.time()
+    attempts = [t for t in CREATE_ATTEMPTS.get(ip, []) if now_ts - t < CREATE_WINDOW_SEC]
+    if len(attempts) >= CREATE_LIMIT:
+        CREATE_ATTEMPTS[ip] = attempts
+        return False, "建桌太频繁，请稍后再试"
+    attempts.append(now_ts)
+    CREATE_ATTEMPTS[ip] = attempts
+    return True, None
+
+
+def touch_player(g, seat, *, reconnected=False):
+    p = g["players"][seat]
+    p["last_seen"] = time.time()
+    if p.get("autoplay"):
+        p["autoplay"] = False
+        if reconnected:
+            g["log"].append(f"{p['name']} 重新连接，解除托管")
+
+
+def apply_timeouts(g):
+    """将长时间没有请求的真人/API座位交给笨 bot，避免全桌陪等。"""
+    if g.get("phase") == "over":
+        return False
+    changed = False
+    now_ts = time.time()
+    for p in g["players"]:
+        if p.get("type") == "bot" or p.get("autoplay"):
+            continue
+        seen = p.get("last_seen")
+        if seen is not None and now_ts - seen >= PLAYER_TIMEOUT_SEC:
+            p["autoplay"] = True
+            p["disconnected_at"] = now_ts
+            g["log"].append(f"{p['name']} 超时，已由笨机托管")
+            changed = True
+    return changed
+
+
+def controlled_by_bot(p):
+    return p.get("type") == "bot" or p.get("autoplay", False)
 
 
 def now():
@@ -103,6 +162,9 @@ def sfx_file(fn):
 
 @app.route("/mj/api/new_table", methods=["POST"])
 def api_new_table():
+    allowed, reason = check_create_permission(request)
+    if not allowed:
+        return jsonify({"ok": False, "error": reason}), 403 if "密钥" in reason else 429
     body = request.get_json(silent=True) or {}
     seats = body.get("seats") or []
     if len(seats) > 4:
@@ -120,10 +182,14 @@ def api_new_table():
     tid = secrets.token_hex(3)
     seed = body.get("seed")
     g = E.new_game(clean, seed=seed)
+    for p in g["players"]:
+        p["last_seen"] = time.time()
+        p["autoplay"] = False
+        p["disconnected_at"] = None
     tokens = {}
     out = []
     for i, s in enumerate(clean):
-        tk = secrets.token_urlsafe(9)
+        tk = secrets.token_urlsafe(32)
         tokens[tk] = i
         out.append({"seat": i, "seat_name": E.SEAT_NAMES[i], "name": s["name"],
                     "type": s["type"], "token": tk,
@@ -143,10 +209,16 @@ def api_state():
     tid = request.args.get("table", "")
     token = request.args.get("token", "")
     seat = request.args.get("seat")
-    t, s, err = auth(tid, seat, token)
-    if err:
-        return jsonify({"ok": False, "error": err[0]}), err[1]
-    v = E.view(t["state"], s)
+    with LOCK:
+        t, s, err = auth(tid, seat, token)
+        if err:
+            return jsonify({"ok": False, "error": err[0]}), err[1]
+        g = t["state"]
+        apply_timeouts(g)
+        touch_player(g, s, reconnected=True)
+        E.run_bots(g, limit=5000)
+        save_table(tid, g)
+        v = E.view(g, s)
     v.update({"ok": True, "table": tid})
     return jsonify(v)
 
@@ -164,6 +236,8 @@ def api_act():
         if err:
             return jsonify({"ok": False, "error": err[0]}), err[1]
         g = t["state"]
+        apply_timeouts(g)
+        touch_player(g, s, reconnected=True)
         try:
             E.act(g, s, action, tile)
             E.run_bots(g, limit=5000)

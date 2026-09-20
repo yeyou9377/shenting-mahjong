@@ -150,6 +150,9 @@ def new_game(seats, seed=None):
             "seat": i,
             "name": s.get("name") or f"{SEAT_NAMES[i]}家",
             "type": s.get("type", "bot"),
+            "autoplay": False,
+            "last_seen": None,
+            "disconnected_at": None,
             "hand": hand,
             "melds": [],
             "discards": [],
@@ -511,6 +514,11 @@ def settle(g):
 
 # ---------- 笨 bot ----------
 
+def controlled_by_bot(p):
+    """bot座位或已因掉线进入托管的真人/API座位。"""
+    return p.get("type") == "bot" or p.get("autoplay", False)
+
+
 def bot_choose(g, seat):
     """返回 (action, tile)。缺门牌优先打，其余打孤张，能胡就胡，不主动碰杠。"""
     p = g["players"][seat]
@@ -561,21 +569,21 @@ def run_bots(g, limit=400):
         actor = None
         if g["phase"] == "que":
             for p in g["players"]:
-                if p["que"] is None and p["type"] == "bot":
+                if p["que"] is None and controlled_by_bot(p):
                     actor = p["seat"]
                     break
             if actor is None:
                 return g
         elif g["step"] == "claim":
             for k in g["claim"]["eligible"]:
-                if k not in g["claim"]["responses"] and g["players"][int(k)]["type"] == "bot":
+                if k not in g["claim"]["responses"] and controlled_by_bot(g["players"][int(k)]):
                     actor = int(k)
                     break
             if actor is None:
                 return g
         else:
             p = g["players"][g["turn"]]
-            if p["type"] == "bot" and not p["hu"]:
+            if controlled_by_bot(p) and not p["hu"]:
                 actor = p["seat"]
             else:
                 return g
@@ -595,6 +603,7 @@ def view(g, seat):
             "seat": p["seat"],
             "name": p["name"],
             "type": p["type"],
+            "autoplay": bool(p.get("autoplay", False)),
             "que": p["que"] if (p["seat"] == seat or g["phase"] != "que") else None,
             "hand_count": len(p["hand"]),
             "melds": [{"type": m["type"], "tile": m["tile"],
