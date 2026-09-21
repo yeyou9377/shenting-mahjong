@@ -589,6 +589,7 @@ def api_state():
         v = E.view(g, s)
         for p in v["players"]:
             p["partner_of"] = g["players"][p["seat"]].get("partner_of")
+        v["fp"] = state_fp(g)
     v.update({"ok": True, "table": tid})
     if t["room"]:
         v["room"] = room_public(t, s)
@@ -603,26 +604,77 @@ def api_act():
     seat = body.get("seat")
     action = (body.get("action") or "").strip()
     tile = body.get("tile")
+    rid = str(body.get("request_id") or "")[:64]
+    client_fp = str(body.get("fp") or "")[:80]
     with LOCK:
         t, s, err = auth(tid, seat, token)
         if err:
             return jsonify({"ok": False, "error": err[0]}), err[1]
         g = t["state"]
+        if not g:
+            return jsonify({"ok": False, "error": "还没开局，先在候场准备"}), 409
         apply_timeouts(g)
         touch_player(g, s, reconnected=True)
-        try:
-            E.act(g, s, action, tile)
-            E.run_bots(g, limit=5000)
-        except E.MJError as e:
-            return jsonify({"ok": False, "error": str(e)}), 400
-        except Exception as e:  # noqa: BLE001
-            return jsonify({"ok": False, "error": f"引擎出错：{e}"}), 500
-        save_table(tid, g)
-        v = E.view(g, s)
-        for p in v["players"]:
-            p["partner_of"] = g["players"][p["seat"]].get("partner_of")
-    v.update({"ok": True, "table": tid})
+        # ---- 幂等：响应丢了客户端重发，不能重复出手 ----
+        # 1) request_id 命中过 → 直接回当前视角
+        # 2) 没带 request_id 但带了 fp（客户端上次看到的状态指纹）：同座同动作同牌、且 fp 等于
+        #    上次成功出手前的指纹 → 说明是从旧状态重发的同一手
+        seen = g.setdefault("acts_seen", [])
+        last = g.setdefault("last_act", {}).get(str(s))
+        dup = (rid and rid in seen) or (
+            not rid and client_fp and last and last.get("action") == action and last.get("tile") == tile
+            and last.get("fp_before") == client_fp)
+        if not dup:
+            fp_before = state_fp(g)
+            try:
+                E.act(g, s, action, tile)
+                E.run_bots(g, limit=5000)
+            except E.MJError as e:
+                return jsonify({"ok": False, "error": str(e), "fp": fp_before}), 400
+            except Exception as e:  # noqa: BLE001
+                return jsonify({"ok": False, "error": f"引擎出错：{e}"}), 500
+            g["last_act"][str(s)] = {"action": action, "tile": tile, "fp_before": fp_before, "rid": rid}
+            if rid:
+                seen.append(rid)
+                del seen[:-ACT_MEMO_MAX]
+            if t["room"]:
+                room_housekeep(t)
+                save_room(t)
+            else:
+                save_table(tid, g)
+        v = act_view(g, s)
+    v.update({"ok": True, "table": tid, "dup": bool(dup)})
     return jsonify(v)
+
+
+ACT_MEMO_MAX = 64
+
+
+def state_fp(g):
+    """牌局指纹：任何一次成功出手（含随后的 bot 连锁）都会改变它。"""
+    claim = g.get("claim") or {}
+    parts = (g["phase"], g["step"], g["turn"], len(g["deck"]), g["hu_seq"],
+             sum(len(p["discards"]) for p in g["players"]),
+             sum(len(p["melds"]) for p in g["players"]),
+             sum(1 for p in g["players"] if p["que"]),
+             len(claim.get("responses", {}) or {}))
+    return "-".join(str(x) for x in parts)
+
+
+def act_view(g, s):
+    """act 的响应：本座视角，但去掉 25 行流水（只留 log_tail 3 行），瘦一半以上；完整流水走 state。"""
+    v = E.view(g, s)
+    for p in v["players"]:
+        p["partner_of"] = g["players"][p["seat"]].get("partner_of")
+    v["log_tail"] = v["log"][-3:]
+    del v["log"]
+    for p in v["players"]:
+        p.pop("discards_text", None)      # 网页用 discards 自己画；文字版看 state
+    for h in v["hand_text"]:
+        h.pop("s", None)                  # s = e+n 的拼接，冗余
+    v["fp"] = state_fp(g)
+    v["slim"] = True
+    return v
 
 
 # ---------- 组局 API（大厅 / 候场） ----------
@@ -898,9 +950,10 @@ body{margin:0;color:var(--fg);overflow:hidden;
 
 /* 三家（对/左/右）容器 */
 .seat{position:absolute;display:flex;flex-direction:column;align-items:center;gap:3px;z-index:2}
-#seatTop{top:6px;left:50%;transform:translateX(-50%);max-width:70%}
-#seatLeft{left:4px;top:46%;transform:translateY(-50%);align-items:flex-start;max-width:24%}
-#seatRight{right:4px;top:46%;transform:translateY(-50%);align-items:flex-end;max-width:24%}
+#seatTop{top:6px;left:50%;transform:translateX(-50%);max-width:84%}
+#seatLeft{left:4px;top:50%;transform:translateY(-50%);align-items:flex-start;max-width:26%}
+#seatRight{right:4px;top:50%;transform:translateY(-50%);align-items:flex-end;max-width:26%}
+#seatLeft .pill,#seatRight .pill{flex-wrap:wrap;max-width:100%;white-space:normal;row-gap:2px}
 
 /* 名牌 */
 .pill{display:flex;align-items:center;gap:5px;background:rgba(0,0,0,.42);
@@ -917,27 +970,30 @@ body{margin:0;color:var(--fg);overflow:hidden;
 .backs.vert{flex-direction:column}
 .back{background:linear-gradient(135deg,#2c7a52,#12492e);border:1px solid #0b3620;
  border-radius:3px;box-shadow:inset 0 1px 0 rgba(255,255,255,.18)}
-.backs .back{width:18px;height:27px}
-.backs.vert .back{width:27px;height:18px}
+.backs .back{width:16px;height:24px}
+.backs.vert .back{width:22px;height:13px}
 .omeld{display:flex;gap:3px;flex-wrap:wrap;justify-content:center;font-size:15px;margin-top:1px}
 .omeld .g{background:rgba(232,196,106,.16);border:1px solid rgba(232,196,106,.4);
  border-radius:4px;padding:0 3px;line-height:1.5}
 .ohu{color:var(--gold);font-weight:700;font-size:12px}
 
 /* ---- 弃牌河 ---- */
-#river{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);
- width:52%;height:52%;display:grid;z-index:1;
- grid-template:"tp tp tp" auto "lf md rt" 1fr "bt bt bt" auto/auto 1fr auto;
- gap:2px}
-.zone{display:flex;flex-wrap:wrap;gap:2px;align-content:flex-start;overflow:hidden}
-#zTop{grid-area:tp;justify-content:center}
-#zBot{grid-area:bt;justify-content:center}
-#zLeft{grid-area:lf;flex-direction:column;width:26px}
-#zRight{grid-area:rt;flex-direction:column;width:26px}
-#zMid{grid-area:md;display:flex;align-items:center;justify-content:center;text-align:center;
- font-size:12px;color:var(--dim);padding:2px}
-.rt{font-size:19px;line-height:1;filter:drop-shadow(0 1px 1px rgba(0,0,0,.5))}
-.rt.hot{background:rgba(232,196,106,.9);border-radius:4px;outline:2px solid #fff3d0}
+/* 弃牌河：四块固定尺寸的区，各放得下 18 张（一家最多约 16 张弃牌：108-52 发牌=56 摸 ÷4）。
+   上下家 6 列×3 行，侧家 3 列×6 行；原来的 grid 版侧家只有一列宽，第二列被截。 */
+#river{position:absolute;inset:0;z-index:1}
+.zone{position:absolute;display:flex;flex-wrap:wrap;gap:3px;align-content:flex-start;overflow:hidden}
+#zTop{top:18%;left:50%;transform:translateX(-50%);width:160px;height:80px;justify-content:center}
+#zBot{bottom:5%;left:50%;transform:translateX(-50%);width:160px;height:80px;justify-content:center}
+#zLeft{left:30px;top:50%;transform:translateY(-50%);width:78px;height:160px;flex-direction:column;align-content:flex-start}
+#zRight{right:30px;top:50%;transform:translateY(-50%);width:78px;height:160px;flex-direction:column;align-content:flex-end}
+#zMid{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);text-align:center;
+ font-size:12px;color:var(--dim);padding:2px;max-width:120px}
+.rt{font-size:22px;line-height:1;filter:drop-shadow(0 1px 1px rgba(0,0,0,.5));
+ background:rgba(253,252,245,.92);color:#111;border-radius:4px;padding:1px 1px 0}
+.rt.hot{background:rgba(232,196,106,.95);outline:2px solid #fff3d0}
+.pill .que{background:rgba(232,196,106,.22);border:1px solid rgba(232,196,106,.55);color:#f6e2a4;
+ border-radius:10px;padding:0 6px;font-size:11px;font-weight:700}
+.pill .que.wait{background:rgba(255,255,255,.08);border-color:rgba(255,255,255,.2);color:var(--dim);font-weight:400}
 #zMid .claim{color:var(--gold);font-weight:700;font-size:15px}
 
 /* 终局面板 */
@@ -1212,16 +1268,25 @@ function renderWait(){
   sb.textContent = r.need>0 ? `开局（${r.need} 个空座笨机补）` : '开局';
   document.getElementById('wlog').textContent=(r.log||[]).slice(-2).join(' · ');
 }
+function rid(){ return Date.now().toString(36)+'-'+Math.random().toString(36).slice(2,10); }
 async function send(action,tile){
   if(busy) return; busy=true;
   document.getElementById('msg').textContent="…";
-  try{
-    const r=await fetch('/mj/api/act',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({table:TABLE,token:TOKEN,action,tile})});
-    const j=await r.json();
-    if(!j.ok){ document.getElementById('msg').textContent="✗ "+j.error; }
-    else { document.getElementById('msg').textContent=""; apply(j); }
-  }catch(e){ document.getElementById('msg').textContent="网络卡了，再点一次"; }
+  // 幂等：同一 request_id + 上次看到的 fp；响应丢了自动重发一次，服务端不会重复出手
+  const body=JSON.stringify({table:TABLE,token:TOKEN,action,tile,request_id:rid(),fp:S&&S.fp});
+  let done=false;
+  for(let attempt=0; attempt<2 && !done; attempt++){
+    try{
+      const r=await fetch('/mj/api/act',{method:'POST',headers:{'Content-Type':'application/json'},body});
+      const j=await r.json();
+      done=true;
+      if(!j.ok){ document.getElementById('msg').textContent="✗ "+j.error; }
+      else { document.getElementById('msg').textContent=""; apply(j); }
+    }catch(e){
+      if(attempt===0){ document.getElementById('msg').textContent="网络卡了，重试中…"; await new Promise(r=>setTimeout(r,700)); }
+      else document.getElementById('msg').textContent="网络卡了，再点一次";
+    }
+  }
   busy=false;
 }
 function apply(j){
@@ -1241,8 +1306,10 @@ function oppHTML(p){
   const backs=Array(p.hand_count).fill('<div class="back"></div>').join('');
   const vert=(rel(p.seat)!==2)?'vert':'';
   const mel=p.melds.map(m=>`<span class="g">${m.tiles.map(emo).join('')}</span>`).join('');
+  const que = p.que ? `<span class="que">缺${SUIT[p.que]}</span>`
+    : (S.phase=='que' ? `<span class="que wait">定缺中</span>` : '');
   return `<div class="pill ${turn}"><span class="dir">${DIRS[rel(p.seat)]}</span>${p.name}`+
-    `${p.type=='bot'?' 🤖':(p.type=='api'?' 🕯️':'')} <span class="cnt">${p.hand_count}</span></div>`+
+    `${p.type=='bot'?' 🤖':(p.type=='api'?' 🕯️':'')} <span class="cnt">${p.hand_count}</span>${que}</div>`+
     `${mel?`<div class="omeld">${mel}</div>`:''}`+
     `<div class="backs ${vert}">${backs}</div>${hu}`;
 }
@@ -1272,9 +1339,11 @@ function render(){
   document.getElementById('zLeft').innerHTML = byRel[3]?riverHTML(byRel[3]):'';
   document.getElementById('zBot').innerHTML  = me?riverHTML(me):'';
   const turnName=(S.players[S.turn]||{}).name||'';
+  const queWait=(S.waiting_seats||[]).map(i=>(S.players[i]||{}).name).filter(Boolean);
   document.getElementById('zMid').innerHTML = S.claim_tile
     ? `<span class="claim">抢 ${lbl(S.claim_tile)}</span>`
-    : (S.phase=='play'?`轮到<br>${turnName}`:'');
+    : (S.phase=='play'?`轮到<br>${turnName}`
+      : (S.phase=='que'?`等定缺<br>${queWait.join('、')}`:''));
 
   // 动作按钮
   const acts=S.available_actions||[];
