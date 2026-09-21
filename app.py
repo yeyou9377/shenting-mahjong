@@ -590,35 +590,31 @@ a{color:#d9b25f}
 .hint{color:#9da593;font-size:13px;margin-top:9px}
 </style></head><body>
 <h1>🀄️ 开一桌川麻</h1>
-<div id="f"></div>
+<p class="hint">默认一桌：两位人类 + 两位小机。开桌后复制座位邀请链接，发给另一位家长即可。</p>
 <button onclick="go()">开桌</button>
 <div id="out"></div>
 <script>
-const seats=["东","南","西","北"];
-document.getElementById('f').innerHTML=seats.map((s,i)=>`
-<div class="row"><div><label>${s}家${i==0?'（庄）':''} 名字</label>
-<input id="n${i}" value="${i==0?'游':'笨机'+i}"></div>
-<div><label>类型</label><select id="t${i}">
-<option value="${i==0?'human':'bot'}">${i==0?'人类（网页）':'笨 bot'}</option>
-<option value="${i==0?'bot':'human'}">${i==0?'笨 bot':'人类（网页）'}</option>
-<option value="api">小机（API）</option></select></div></div>`).join('');
 async function go(){
-  const seats=[0,1,2,3].map(i=>({name:document.getElementById('n'+i).value,
-                                 type:document.getElementById('t'+i).value}));
+  const seats=[
+    {name:'游游',type:'human'},
+    {name:'家长',type:'human'},
+    {name:'小机1',type:'bot'},
+    {name:'小机2',type:'bot'}
+  ];
   const r=await fetch('/mj/api/new_table',{method:'POST',
     headers:{'Content-Type':'application/json'},body:JSON.stringify({seats})});
   const j=await r.json();
   if(!j.ok){document.getElementById('out').textContent=j.error;return;}
   const origin=location.origin;
   const absolute=s=>new URL(s.web_url,origin).href;
-  const copy=async(text,button)=>{
+  window.copyInvite=async(text,button)=>{
     try{ await navigator.clipboard.writeText(text); button.textContent='已复制 ✓'; }
     catch(e){ window.prompt('复制这段内容：',text); }
     setTimeout(()=>button.textContent='复制邀请',1600);
   };
-  const share=async(text,button)=>{
+  window.shareInvite=async(text,button)=>{
     if(navigator.share){ try{ await navigator.share({title:'神庭麻将',text}); button.textContent='已分享 ✓'; setTimeout(()=>button.textContent='分享',1600); return; }catch(e){} }
-    copy(text,button);
+    window.copyInvite(text,button);
   };
   const cards=j.seats.map(s=>{
     if(s.type=='bot') return `<div class="seat-card"><div class="seat-info"><b>${s.seat_name}家 · ${s.name}</b><small>笨 bot 自动补位</small></div><span class="bot">🤖</span></div>`;
@@ -626,11 +622,11 @@ async function go(){
       ? `神庭麻将小机座位\n桌号：${j.table}\n座位：${s.seat}\nToken：${s.token}\n状态接口：${origin}/mj/api/state?table=${j.table}&seat=${s.seat}&token=${s.token}`
       : `来神庭麻将和我玩：${absolute(s)}`;
     return `<div class="seat-card"><div class="seat-info"><b>${s.seat_name}家 · ${s.name}</b><small>${s.type=='api'?'小机 API 座位':'人类网页座位'} · ${s.type=='api'?'请把接入信息发给小机':'打开链接即可入座'}</small></div>`+
-      `<button onclick='copy(${JSON.stringify(text)},this)'>复制邀请</button>`+
-      (s.type=='human'?`<button onclick='share(${JSON.stringify(text)},this)'>分享</button>`:'')+
+      `<button onclick='window.copyInvite(${JSON.stringify(text)},this)'>复制邀请</button>`+
+      (s.type=='human'?`<button onclick='window.shareInvite(${JSON.stringify(text)},this)'>分享</button>`:'')+
       `</div>`;
   }).join('');
-  document.getElementById('out').innerHTML=`<div class="room"><div class="room-title"><div>房间码 <span class="room-code">${j.table}</span></div><button onclick='copy(${JSON.stringify(j.table)},this)'>复制房间码</button></div>${cards}<div class="hint">把对应座位的邀请链接发给家长；笨 bot 会自动补空位。</div></div>`;
+  document.getElementById('out').innerHTML=`<div class="room"><div class="room-title"><div>房间码 <span class="room-code">${j.table}</span></div><button onclick='window.copyInvite(${JSON.stringify(j.table)},this)'>复制房间码</button></div>${cards}<div class="hint">把“家长”座位的邀请链接发给另一位家长；小机座位会自动补位。</div></div>`;
 }
 </script></body></html>"""
 
