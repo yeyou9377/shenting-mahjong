@@ -951,8 +951,8 @@ body{margin:0;color:var(--fg);overflow:hidden;
 /* 三家（对/左/右）容器 */
 .seat{position:absolute;display:flex;flex-direction:column;align-items:center;gap:3px;z-index:2}
 #seatTop{top:6px;left:50%;transform:translateX(-50%);max-width:84%}
-#seatLeft{left:4px;top:50%;transform:translateY(-50%);align-items:flex-start;max-width:26%}
-#seatRight{right:4px;top:50%;transform:translateY(-50%);align-items:flex-end;max-width:26%}
+#seatLeft{left:4px;top:50%;transform:translateY(-50%);align-items:flex-start;max-width:23%}
+#seatRight{right:4px;top:50%;transform:translateY(-50%);align-items:flex-end;max-width:23%}
 #seatLeft .pill,#seatRight .pill{flex-wrap:wrap;max-width:100%;white-space:normal;row-gap:2px}
 
 /* 名牌 */
@@ -980,16 +980,26 @@ body{margin:0;color:var(--fg);overflow:hidden;
 /* ---- 弃牌河 ---- */
 /* 弃牌河：四块固定尺寸的区，各放得下 18 张（一家最多约 16 张弃牌：108-52 发牌=56 摸 ÷4）。
    上下家 6 列×3 行，侧家 3 列×6 行；原来的 grid 版侧家只有一列宽，第二列被截。 */
+/* 环形：上河(6×3) / [左河(4×4) 中 右河(4×4)] / 下河(6×3)，竖向叠放绝不重叠；整环在牌桌里居中略偏下，顶上让给对家。
+   牌大小随屏宽：--rt = 24~30px（390 宽 ≈ 29px）。每张牌是固定 1.1em×1.3em 的盒子，字符在盒内水平垂直居中。 */
+#table{--rt:clamp(24px,7.4vw,30px);--tw:calc(1.1*var(--rt));--th:calc(1.3*var(--rt));
+ --ringH:calc(10*var(--th) + 18px);--ringTop:calc(50% + 28px - var(--ringH)/2);
+ --rowH:calc(3*var(--th) + 4px);--sideH:calc(4*var(--th) + 6px);--sideW:calc(4*var(--tw) + 6px)}
 #river{position:absolute;inset:0;z-index:1}
-.zone{position:absolute;display:flex;flex-wrap:wrap;gap:3px;align-content:flex-start;overflow:hidden}
-#zTop{top:18%;left:50%;transform:translateX(-50%);width:160px;height:80px;justify-content:center}
-#zBot{bottom:5%;left:50%;transform:translateX(-50%);width:160px;height:80px;justify-content:center}
-#zLeft{left:30px;top:50%;transform:translateY(-50%);width:78px;height:160px;flex-direction:column;align-content:flex-start}
-#zRight{right:30px;top:50%;transform:translateY(-50%);width:78px;height:160px;flex-direction:column;align-content:flex-end}
-#zMid{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);text-align:center;
- font-size:12px;color:var(--dim);padding:2px;max-width:120px}
-.rt{font-size:22px;line-height:1;filter:drop-shadow(0 1px 1px rgba(0,0,0,.5));
- background:rgba(253,252,245,.92);color:#111;border-radius:4px;padding:1px 1px 0}
+.zone{position:absolute;display:flex;flex-wrap:wrap;gap:2px;align-content:flex-start;overflow:visible}
+#zTop{top:var(--ringTop);left:50%;transform:translateX(-50%);width:calc(6*var(--tw) + 10px);height:var(--rowH);justify-content:center}
+#zLeft{left:28px;top:calc(var(--ringTop) + var(--rowH) + 6px);width:var(--sideW);height:var(--sideH);
+ flex-direction:column;align-content:flex-start}
+#zRight{right:28px;top:calc(var(--ringTop) + var(--rowH) + 6px);width:var(--sideW);height:var(--sideH);
+ flex-direction:column;align-content:flex-end}
+#zBot{top:calc(var(--ringTop) + var(--rowH) + var(--sideH) + 12px);left:50%;transform:translateX(-50%);
+ width:calc(6*var(--tw) + 10px);height:var(--rowH);justify-content:center}
+#zMid{position:absolute;left:50%;top:calc(var(--ringTop) + var(--rowH) + 6px + var(--sideH)/2);
+ transform:translate(-50%,-50%);text-align:center;font-size:12px;color:var(--dim);padding:2px;
+ width:calc(100% - 2*(28px + var(--sideW)) - 8px);max-width:120px}
+.rt{display:inline-flex;align-items:center;justify-content:center;width:var(--tw);height:var(--th);
+ font-size:var(--rt);line-height:1;filter:drop-shadow(0 1px 1px rgba(0,0,0,.5));
+ background:rgba(253,252,245,.92);color:#111;border-radius:4px;padding:0}
 .rt.hot{background:rgba(232,196,106,.95);outline:2px solid #fff3d0}
 .pill .que{background:rgba(232,196,106,.22);border:1px solid rgba(232,196,106,.55);color:#f6e2a4;
  border-radius:10px;padding:0 6px;font-size:11px;font-weight:700}
@@ -1023,11 +1033,12 @@ button.a.hu{background:var(--gold);color:#3a2c00}
 #mymeld .g b{color:var(--gold);font-size:11px;font-weight:700;margin-right:2px}
 #hand{display:flex;flex-wrap:wrap;gap:5px;justify-content:center}
 .t{background:linear-gradient(#fdfcf5,#efe8d3);color:#1a1a1a;border:none;border-radius:8px;
- min-width:46px;height:60px;padding:4px 3px;display:flex;flex-direction:column;
+ min-width:46px;height:62px;padding:4px 3px 3px;display:flex;flex-direction:column;
  align-items:center;justify-content:center;
  box-shadow:0 3px 0 #b7ad92,0 4px 7px rgba(0,0,0,.4)}
-.t .e{font-size:30px;line-height:1}
-.t small{font-size:10px;color:#5a5a5a;margin-top:1px}
+/* 大字符放在固定高度的盒子里居中，小标签和它拉开 5px */
+.t .e{font-size:30px;line-height:1;display:flex;align-items:center;justify-content:center;height:34px;width:34px}
+.t small{font-size:10px;color:#5a5a5a;margin-top:5px;line-height:1}
 .t.on{outline:2px solid var(--gold);transform:translateY(-3px);
  box-shadow:0 6px 0 #b7ad92,0 8px 10px rgba(0,0,0,.45)}
 .t.off{opacity:.5}
