@@ -590,7 +590,7 @@ a{color:#d9b25f}
 .hint{color:#9da593;font-size:13px;margin-top:9px}
 </style></head><body>
 <h1>🀄️ 开一桌川麻</h1>
-<p class="hint">默认一桌：两位人类 + 两位小机。开桌后复制座位邀请链接，发给另一位家长即可。</p>
+<p class="hint">默认一桌：两组人机搭档（人类 + 各自的小机）。缺席的座位会在超时后由笨 bot 托底。</p>
 <button onclick="go()">开桌</button>
 <div id="out"></div>
 <script>
@@ -598,8 +598,8 @@ async function go(){
   const seats=[
     {name:'游游',type:'human'},
     {name:'家长',type:'human'},
-    {name:'小机1',type:'bot'},
-    {name:'小机2',type:'bot'}
+    {name:'游游的灵伴',type:'api'},
+    {name:'家长的灵伴',type:'api'}
   ];
   const r=await fetch('/mj/api/new_table',{method:'POST',
     headers:{'Content-Type':'application/json'},body:JSON.stringify({seats})});
@@ -626,7 +626,7 @@ async function go(){
       (s.type=='human'?`<button onclick='window.shareInvite(${JSON.stringify(text)},this)'>分享</button>`:'')+
       `</div>`;
   }).join('');
-  document.getElementById('out').innerHTML=`<div class="room"><div class="room-title"><div>房间码 <span class="room-code">${j.table}</span></div><button onclick='window.copyInvite(${JSON.stringify(j.table)},this)'>复制房间码</button></div>${cards}<div class="hint">把“家长”座位的邀请链接发给另一位家长；小机座位会自动补位。</div></div>`;
+  document.getElementById('out').innerHTML=`<div class="room"><div class="room-title"><div>房间码 <span class="room-code">${j.table}</span></div><button onclick='window.copyInvite(${JSON.stringify(j.table)},this)'>复制房间码</button></div>${cards}<div class="hint">把人类座位链接发给另一位家长，再把各自灵伴的接入信息发给对应小机；缺席座位会自动托管。</div></div>`;
 }
 </script></body></html>"""
 
