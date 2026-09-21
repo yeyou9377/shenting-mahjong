@@ -306,12 +306,12 @@ body{margin:0;color:var(--fg);overflow:hidden;
  50%{box-shadow:0 0 13px 3px rgba(232,196,106,.6)}}
 
 /* 牌背 */
-.backs{display:flex;gap:2px;flex-wrap:wrap;justify-content:center}
+.backs{display:flex;gap:3px;flex-wrap:wrap;justify-content:center}
 .backs.vert{flex-direction:column}
 .back{background:linear-gradient(135deg,#2c7a52,#12492e);border:1px solid #0b3620;
  border-radius:3px;box-shadow:inset 0 1px 0 rgba(255,255,255,.18)}
-.backs .back{width:13px;height:19px}
-.backs.vert .back{width:22px;height:13px}
+.backs .back{width:18px;height:27px}
+.backs.vert .back{width:27px;height:18px}
 .omeld{display:flex;gap:3px;flex-wrap:wrap;justify-content:center;font-size:15px;margin-top:1px}
 .omeld .g{background:rgba(232,196,106,.16);border:1px solid rgba(232,196,106,.4);
  border-radius:4px;padding:0 3px;line-height:1.5}
