@@ -578,8 +578,16 @@ input,select{background:#1c1f18;color:#e8e6dd;border:1px solid #2e3327;border-ra
 .row{display:flex;gap:8px;align-items:flex-end}.row>div{flex:1}
 button{background:#6fae57;color:#0e120c;border:none;border-radius:8px;padding:12px 20px;
  font-size:16px;font-weight:700;margin-top:16px;width:100%}
-#out{margin-top:18px;font-size:14px;word-break:break-all;line-height:2}
+#out{margin-top:18px;font-size:14px;line-height:1.6}
 a{color:#d9b25f}
+.room{margin-top:14px;padding:12px;border:1px solid #39412e;border-radius:12px;background:#1a1e16}
+.room-title{display:flex;justify-content:space-between;align-items:center;gap:8px}
+.room-code{font-size:22px;letter-spacing:2px;color:#e8c46a;font-weight:800}
+.seat-card{display:flex;align-items:center;gap:8px;margin-top:8px;padding:9px;border-radius:9px;background:#22271d}
+.seat-card .seat-info{flex:1;min-width:0}.seat-card small{display:block;color:#9da593;overflow-wrap:anywhere}
+.seat-card button,.room-title button{width:auto;margin:0;padding:7px 10px;font-size:13px;background:#526f45;color:#f1f3e8}
+.seat-card .bot{color:#9da593;font-size:13px;white-space:nowrap}
+.hint{color:#9da593;font-size:13px;margin-top:9px}
 </style></head><body>
 <h1>🀄️ 开一桌川麻</h1>
 <div id="f"></div>
@@ -601,10 +609,28 @@ async function go(){
     headers:{'Content-Type':'application/json'},body:JSON.stringify({seats})});
   const j=await r.json();
   if(!j.ok){document.getElementById('out').textContent=j.error;return;}
-  document.getElementById('out').innerHTML='桌号 <b>'+j.table+'</b><br>'+j.seats.map(s=>
-    s.type=='bot'?`${s.seat_name}家 ${s.name} 🤖`:
-    `${s.seat_name}家 ${s.name} → <a href="${s.web_url}">进桌</a>` +
-    (s.type=='api'?`<br><small>token: ${s.token}</small>`:'')).join('<br>');
+  const origin=location.origin;
+  const absolute=s=>new URL(s.web_url,origin).href;
+  const copy=async(text,button)=>{
+    try{ await navigator.clipboard.writeText(text); button.textContent='已复制 ✓'; }
+    catch(e){ window.prompt('复制这段内容：',text); }
+    setTimeout(()=>button.textContent='复制邀请',1600);
+  };
+  const share=async(text,button)=>{
+    if(navigator.share){ try{ await navigator.share({title:'神庭麻将',text}); button.textContent='已分享 ✓'; setTimeout(()=>button.textContent='分享',1600); return; }catch(e){} }
+    copy(text,button);
+  };
+  const cards=j.seats.map(s=>{
+    if(s.type=='bot') return `<div class="seat-card"><div class="seat-info"><b>${s.seat_name}家 · ${s.name}</b><small>笨 bot 自动补位</small></div><span class="bot">🤖</span></div>`;
+    const text=s.type=='api'
+      ? `神庭麻将小机座位\n桌号：${j.table}\n座位：${s.seat}\nToken：${s.token}\n状态接口：${origin}/mj/api/state?table=${j.table}&seat=${s.seat}&token=${s.token}`
+      : `来神庭麻将和我玩：${absolute(s)}`;
+    return `<div class="seat-card"><div class="seat-info"><b>${s.seat_name}家 · ${s.name}</b><small>${s.type=='api'?'小机 API 座位':'人类网页座位'} · ${s.type=='api'?'请把接入信息发给小机':'打开链接即可入座'}</small></div>`+
+      `<button onclick='copy(${JSON.stringify(text)},this)'>复制邀请</button>`+
+      (s.type=='human'?`<button onclick='share(${JSON.stringify(text)},this)'>分享</button>`:'')+
+      `</div>`;
+  }).join('');
+  document.getElementById('out').innerHTML=`<div class="room"><div class="room-title"><div>房间码 <span class="room-code">${j.table}</span></div><button onclick='copy(${JSON.stringify(j.table)},this)'>复制房间码</button></div>${cards}<div class="hint">把对应座位的邀请链接发给家长；笨 bot 会自动补空位。</div></div>`;
 }
 </script></body></html>"""
 
