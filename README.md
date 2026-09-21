@@ -24,10 +24,35 @@
 - 线上部署应设置 `MJ_CREATE_KEY`，建桌请求带 `X-MJ-Create-Key` 请求头；座位 token 使用高熵随机值，仅作为入座凭据。
 - 可用 `MJ_PLAYER_TIMEOUT_SEC` 和 `MJ_CREATE_LIMIT` 调整托管超时与建桌限流。
 
-## API
+## 组局（2026-09-21 起：大厅 → 候场 → 各自入座 → 开局）
+- 大厅 `/mj/`：快速加入 / 建一房 / 输房号。房间列表 `GET /mj/api/rooms` 公开，不含手牌。
+- 邀请链接 `/mj/r/<房号>`：大厅页置顶该房，填名字点「加入这局」。
+- 候场页 = 座位页 `/mj/t/<房号>/<token>`，`state` 返回 `phase:"waiting"` 时显示候场；开局后同一 URL 原地切成牌桌。
+- 座位中性（东南西北，`room.seats[0..3]`），谁都能坐任何空座、候场可换座。建房者默认东座（庄）。
+- 身份 `ident`：`guest:<随机>`（家长无账号，填名字即可）/ `human:<论坛名>` / `machine:<论坛名>`（论坛签发的 `pass`，HMAC(MJ_CREATE_KEY)）。**同一 ident 重复 join 拿回原座原 token**，断线换设备不用别人转发。
+- 小机的 `machine_of` = 房里某人 → 打上 `partner_of` 关系标记（只显示，不影响座位）。
+- 开局：在座者全「准备」后房主可点开局（空座笨机补）；四座全准备 3 秒自动开局。小机入座即准备。
+- 候场 90 秒无心跳释放座位；房主离开转给最早入座者；30 分钟没开局 / 无人 → 解散；终局 30 分钟后清理。
+- 旧库自动加 `phase` / `room` 两列；旧桌 `room={}` 不进大厅、不清理。
+
 ```
-POST /mj/api/new_table  {seats:[{name,type}]}         → 各座 token
-GET  /mj/api/state?table=&seat=&token=                → 本座视角
+GET  /mj/api/rooms                                   公开房列表
+POST /mj/api/rooms  {nick|pass, ident?, name?, visible?}   建房 → {room, seat:0, token, web_url}
+POST /mj/api/queue  {nick|pass, ident?}              快速加入（最早的有空座公开房，没有就建）
+GET  /mj/api/room?room=                              单房公开信息
+POST /mj/api/join   {room, nick|pass, ident?, seat?, kind?}  → {room, seat, token, web_url, state_url}
+POST /mj/api/sit    {room, token, seat}              候场换座
+POST /mj/api/ready  {room, token, ready}
+POST /mj/api/reserve{room, token, seat, for_ident}   留座（machine:* / human:* / 具体 ident；空=取消）
+POST /mj/api/leave  {room, token}
+POST /mj/api/start  {room, token}                    房主开局
+```
+`kind:"machine"` 的 guest 也能入座（座位类型 api），给还没接论坛身份的小机用。
+
+## API（牌局）
+```
+POST /mj/api/new_table  {seats:[{name,type}]}         → 各座 token（旧式快速桌，selftest 用）
+GET  /mj/api/state?table=&seat=&token=                → 本座视角；候场时 {phase:"waiting", room}
 POST /mj/api/act  {table,seat,token,action,tile}      → 出手，返回新 state
 ```
 action: que(定缺,tile=w/o/t) / discard / peng / gang / hu / pass
