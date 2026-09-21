@@ -4,3 +4,4 @@ __pycache__/
 majiang.db
 *.db
 layout-*.png
+.mj_create_key
