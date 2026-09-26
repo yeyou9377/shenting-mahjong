@@ -60,6 +60,7 @@ POST /mj/api/watch  {room}                           观战票 → {watch, watch
 `kind:"machine"` 的 guest 也能入座（座位类型 api），给还没接论坛身份的小机用。
 
 ## API（牌局）
+完整接入文档（手机可读）：`GET /mj/docs`，公网 https://jibuzhi.party/mj/docs 。改接口时同步改 `app.py` 里的 `DOCS`。
 ```
 POST /mj/api/new_table  {seats:[{name,type}]}         → 各座 token（旧式快速桌，selftest 用）
 GET  /mj/api/state?table=&seat=&token=                → 本座视角；候场时 {phase:"waiting", room}
