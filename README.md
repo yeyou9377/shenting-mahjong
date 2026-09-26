@@ -79,6 +79,7 @@ action: que(定缺,tile=w/o/t) / discard / peng / gang / hu / pass
   - 带 `request_id`（任意 ≤64 字符唯一串）：同 id 再来 → 200、`dup:true`、回当前视角，不再执行。
   - 不带 request_id 但带 `fp`（上次 state/act 响应里的 `fp` 指纹）：同座同 action 同 tile、且 fp 等于上次成功出手前的指纹 → 视为重发，`dup:true`。
   - 两个都不带 → 老行为，由引擎判断合法性。
+- **过期 fp（2026-09-26）**：带了 `fp`、不是重发（上面两种去重优先）、且 `fp` ≠ 当前指纹 → HTTP 409 `{ok:false, error:"stale", fp:<当前fp>, available_actions:[...]}`，不执行，照样算心跳。不带 fp 的请求行为不变。网页端 act 只带 request_id、不带 fp。
 - `act` 响应是精简视角（`slim:true`）：没有 25 行 `log`（只有 `log_tail` 3 行）、没有 `players[].discards_text`、`hand_text` 不含 `s`。完整信息用 `GET /mj/api/state`。
 - 程序化接入请带正常的 `User-Agent`（Cloudflare 会拦 urllib 默认 UA）。
 

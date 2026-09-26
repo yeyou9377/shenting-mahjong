@@ -820,6 +820,17 @@ def api_act():
         dup = (rid and rid in seen) or (
             not rid and client_fp and last and last.get("action") == action and last.get("tile") == tile
             and last.get("fp_before") == client_fp)
+        # ---- 过期：带了 fp、不是重发、且 fp ≠ 当前指纹 → 409，把当前 fp 和可选动作直接给回去 ----
+        # 不带 fp 的请求不受影响。这次请求照样算心跳（和 state 轮询一样推进一下笨机再回）。
+        if not dup and client_fp and client_fp != state_fp(g):
+            E.run_bots(g, limit=5000)
+            if t["room"]:
+                room_housekeep(t)
+                save_room(t)
+            else:
+                save_table(tid, g)
+            return jsonify({"ok": False, "error": "stale", "fp": state_fp(g),
+                            "available_actions": E.available_actions(g, s)}), 409
         if not dup:
             fp_before = state_fp(g)
             try:
@@ -1840,8 +1851,9 @@ function rid(){ return Date.now().toString(36)+'-'+Math.random().toString(36).sl
 async function send(action,tile){
   if(busy) return; busy=true; actSeq++;
   document.getElementById('msg').textContent="…";
-  // 幂等：同一 request_id + 上次看到的 fp；响应丢了自动重发一次，服务端不会重复出手
-  const body=JSON.stringify({table:TABLE,token:TOKEN,action,tile,request_id:rid(),fp:S&&S.fp});
+  // 幂等：同一 request_id；响应丢了自动重发一次，服务端不会重复出手。
+  // 不带 fp：带了 fp 的请求在局面变化后会被 409 stale 拒掉，网页由引擎判合法性（老行为）
+  const body=JSON.stringify({table:TABLE,token:TOKEN,action,tile,request_id:rid()});
   let done=false;
   for(let attempt=0; attempt<2 && !done; attempt++){
     try{
@@ -2373,17 +2385,20 @@ li{margin:3px 0}
 <tr><td><code>table</code> / <code>token</code></td><td>房号 / 座位 token；<code>seat</code> 可省，给了必须和 token 对得上</td></tr>
 <tr><td><code>action</code> / <code>tile</code></td><td>见上表</td></tr>
 <tr><td><code>request_id</code></td><td>可选，≤64 字符的唯一串。同一个 id 再发 → 200 + <code>dup:true</code>，只回当前视角，不再执行</td></tr>
-<tr><td><code>fp</code></td><td>可选，你做决定时看到的 <code>fp</code>。用于去重，见下</td></tr>
+<tr><td><code>fp</code></td><td>可选，你做决定时看到的 <code>fp</code>。用于去重和过期检测，见下</td></tr>
 </table></div>
 <p>成功响应是<b>精简</b>的本座视角（<code>slim:true</code>）：和 state 相同的字段，但没有 25 行 <code>log</code>（改为 <code>log_tail</code> 最近 3 行）、没有 <code>players[].discards_text</code>、<code>hand_text</code> 不含 <code>s</code>。另带 <code>dup</code>（这次是否被识别为重发）。完整信息请走 state。</p>
-<h3>幂等（按这个顺序判断）</h3>
+<h3>幂等与过期（按这个顺序判断）</h3>
 <ol>
 <li><b>重发识别</b>（响应丢了可以原样重发，不会重复出手）：
  <ul><li>带 <code>request_id</code>：这个 id 之前成功过 → <code>dup:true</code>。</li>
  <li>不带 <code>request_id</code> 但带 <code>fp</code>：同座同 action 同 tile，且 <code>fp</code> 等于上次成功出手<b>之前</b>的指纹 → <code>dup:true</code>。</li></ul></li>
-<li>其余情况 → 老行为：直接交给引擎判断合法性，不合法返回 400 + <code>error</code> + 当前 <code>fp</code>。</li>
+<li><b>过期</b>：带了 <code>fp</code>、不是重发、且 <code>fp</code> ≠ 当前指纹 → <b>HTTP 409</b>，不执行：
+<pre><code>{"ok":false, "error":"stale", "fp":"&lt;当前 fp&gt;", "available_actions":[...当前可选动作...]}</code></pre>
+ 拿返回的 <code>fp</code> 和 <code>available_actions</code> 重新决定再发即可（需要看牌就拉一次 state）。本次请求照样算心跳。</li>
+<li>都不带 → 老行为：直接交给引擎判断合法性，不合法返回 400 + <code>error</code> + 当前 <code>fp</code>。</li>
 </ol>
-<div class="note">推荐做法：每次 act 带新的 <code>request_id</code>；网络异常时用<b>同一个</b> request_id 原样重发。</div>
+<div class="note">推荐做法：每次 act 都带 <code>fp</code>（你决策所依据的那次 state 的 fp）+ 新的 <code>request_id</code>；网络异常时用<b>同一个</b> request_id 原样重发。</div>
 
 <h2 id="ping">POST /api/ping（显式心跳）</h2>
 <p><span class="m">POST</span><code>/api/ping</code> <code>{table, token, seat?}</code><br>
@@ -2430,7 +2445,7 @@ li{margin:3px 0}
 <tr><td>400</td><td>动作不合法（引擎拒绝，<code>error</code> 有原因，附当前 <code>fp</code>）/ 参数不对</td></tr>
 <tr><td>403</td><td>token 不对、token 和 seat 对不上、观战票做座位操作、非房主开局</td></tr>
 <tr><td>404</td><td>没有这个房 / 桌</td></tr>
-<tr><td>409</td><td>还没开局就 act、开打后 join/leave/换座 等</td></tr>
+<tr><td>409</td><td><code>error:"stale"</code>：fp 过期（见 act）；或 还没开局就 act、开打后 join/leave/换座 等</td></tr>
 <tr><td>410</td><td>房间已解散 / 你的候场座位因超时被释放（带 <code>gone:true</code>）</td></tr>
 <tr><td>429</td><td>组局接口太频繁，歇一分钟</td></tr>
 </table></div>
