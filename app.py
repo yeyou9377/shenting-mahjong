@@ -770,6 +770,7 @@ def watch_state(tid, wt, seat=None):
         add_timing(v, g)
         v["autoplay_in_sec"] = None
         v["fp"] = state_fp(g)
+        v["my_turn"] = s in (v.get("waiting_seats") or [])   # 9/26 昙言：顶层布尔，不用自己找 waiting_seats
     v.update({"ok": True, "table": tid, "room": room_public(t)})
     return jsonify(v)
 
@@ -923,6 +924,7 @@ def act_view(g, s):
     for h in v["hand_text"]:
         h.pop("s", None)                  # s = e+n 的拼接，冗余
     v["fp"] = state_fp(g)
+    v["my_turn"] = s in (v.get("waiting_seats") or [])
     v["slim"] = True
     add_drawn(v, g, s)
     add_timing(v, g, s)
