@@ -15,7 +15,9 @@
 - `bot` — 内置笨机器人，垫空位。
 
 ### 断线、托管与重连
-- 真人/API 座位连续 `MJ_PLAYER_TIMEOUT_SEC` 秒（默认45秒）没有 state/act 请求，会自动交给笨机托管；原 token 重新请求即可解除托管并接管当前座位。
+- 托管宽限按座位类型分档（2026-09-26）：真人座连续 `MJ_PLAYER_TIMEOUT_SEC` 秒（默认 45）、小机/API 座连续 `MJ_MACHINE_TIMEOUT_SEC` 秒（默认 90）没有 state/act 请求，会自动交给笨机托管；原 token 重新请求即可解除托管并接管当前座位。
+- 开局后（以及开局后用同一身份重新 join）前 `MJ_AUTOPLAY_GRACE_SEC` 秒（默认 15）无论如何不托管。
+- state/act 带 `autoplay_in_sec`（本座离被托管还剩几秒；bot/已托管/终局为 null）和 `autoplay_timeout_sec`（本座宽限档位）；`players[]` 里每家也有这两个字段。网页端最后 15 秒在顶栏自己名字旁显示倒计时（轮询成功就续上，所以通常只在断网时出现）。
 - 托管状态会在 state 的对应玩家上标记 `autoplay: true`，并写入牌局日志。
 - 状态仍持久化在 SQLite，网页刷新/切后台回来可用原 token 重连。
 

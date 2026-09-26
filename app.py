@@ -18,6 +18,7 @@
 import base64
 import hashlib
 import json
+import math
 import os
 import re
 import secrets
@@ -36,7 +37,11 @@ DB_PATH = os.path.join(APP_DIR, "majiang.db")
 CST = timezone(timedelta(hours=8))
 LOCK = threading.Lock()
 MELD_NAME = {"peng": "碰", "gang_ming": "明杠", "gang_an": "暗杠", "gang_bu": "补杠"}
-PLAYER_TIMEOUT_SEC = int(os.environ.get("MJ_PLAYER_TIMEOUT_SEC", "45"))
+# 托管宽限按座位类型分档（2026-09-26）：真人 45 秒；小机（api 座，REST 轮询、可能在想）90 秒；
+# 入座 / 开局后前 AUTOPLAY_GRACE_SEC 秒无论如何不托管。
+PLAYER_TIMEOUT_SEC = int(os.environ.get("MJ_PLAYER_TIMEOUT_SEC", "45"))          # human
+MACHINE_TIMEOUT_SEC = int(os.environ.get("MJ_MACHINE_TIMEOUT_SEC", "90"))        # api / machine
+AUTOPLAY_GRACE_SEC = int(os.environ.get("MJ_AUTOPLAY_GRACE_SEC", "15"))
 CREATE_WINDOW_SEC = 60
 CREATE_LIMIT = int(os.environ.get("MJ_CREATE_LIMIT", "8"))
 CREATE_ATTEMPTS = {}
@@ -120,17 +125,48 @@ def touch_player(g, seat, *, reconnected=False):
             g["log"].append(f"{p['name']} 重新连接，解除托管")
 
 
+def timeout_for(p):
+    return MACHINE_TIMEOUT_SEC if p.get("type") == "api" else PLAYER_TIMEOUT_SEC
+
+
+def autoplay_deadline(p):
+    """这个座位到几点会被托管；bot / 已托管 / 没有心跳记录 → None。"""
+    if p.get("type") == "bot" or p.get("autoplay"):
+        return None
+    seen = p.get("last_seen")
+    if seen is None:
+        return None
+    return max(seen + timeout_for(p), p.get("grace_until") or 0)
+
+
+def grant_grace(p, ts=None):
+    ts = ts or time.time()
+    p["grace_until"] = ts + AUTOPLAY_GRACE_SEC
+
+
+def add_timing(v, g, seat=None):
+    """players[].autoplay_in_sec（离被托管还剩几秒，null=不会/已托管/终局），本座另给顶层 autoplay_in_sec。"""
+    now_ts = time.time()
+    over = g.get("phase") == "over"
+    for p in v["players"]:
+        dl = None if over else autoplay_deadline(g["players"][p["seat"]])
+        p["autoplay_in_sec"] = None if dl is None else max(0, int(math.ceil(dl - now_ts)))
+        p["autoplay_timeout_sec"] = None if g["players"][p["seat"]].get("type") == "bot" else timeout_for(g["players"][p["seat"]])
+    if seat is not None:
+        v["autoplay_in_sec"] = v["players"][seat]["autoplay_in_sec"]
+        v["autoplay_timeout_sec"] = v["players"][seat]["autoplay_timeout_sec"]
+    return v
+
+
 def apply_timeouts(g):
-    """将长时间没有请求的真人/API座位交给笨 bot，避免全桌陪等。"""
+    """将长时间没有请求的真人/API座位交给笨 bot，避免全桌陪等。宽限按座位类型分档，入座/开局后有保护期。"""
     if g.get("phase") == "over":
         return False
     changed = False
     now_ts = time.time()
     for p in g["players"]:
-        if p.get("type") == "bot" or p.get("autoplay"):
-            continue
-        seen = p.get("last_seen")
-        if seen is not None and now_ts - seen >= PLAYER_TIMEOUT_SEC:
+        dl = autoplay_deadline(p)
+        if dl is not None and now_ts >= dl:
             p["autoplay"] = True
             p["disconnected_at"] = now_ts
             g["log"].append(f"{p['name']} 超时，已由笨机托管")
@@ -413,6 +449,10 @@ def join_room(t, who, seat=None):
     for i, s in enumerate(r["seats"]):
         if s and s["kind"] != "reserved" and s["ident"] == who["ident"]:
             s["last_seen"] = time.time()
+            if t["state"] and t["state"].get("phase") != "over":     # 开局后重新 join：续上心跳 + 保护期
+                p = t["state"]["players"][i]
+                p["last_seen"] = time.time()
+                grant_grace(p)
             return i, seat_token(t, i)
     if t["phase"] != "waiting":
         raise ValueError("这桌已经开打了")
@@ -465,6 +505,7 @@ def start_room(t):
     g = E.new_game(seats)
     for i, p in enumerate(g["players"]):
         p["last_seen"] = ts
+        grant_grace(p, ts)
         p["autoplay"] = False
         p["disconnected_at"] = None
         p["ident"] = r["seats"][i]["ident"]
@@ -620,6 +661,7 @@ def api_new_table():
     g = E.new_game(clean, seed=seed)
     for p in g["players"]:
         p["last_seen"] = time.time()
+        grant_grace(p)
         p["autoplay"] = False
         p["disconnected_at"] = None
     tokens = {}
@@ -679,6 +721,7 @@ def api_state():
             p["partner_of"] = g["players"][p["seat"]].get("partner_of")
         v["fp"] = state_fp(g)
         add_drawn(v, g, s)
+        add_timing(v, g, s)
     v.update({"ok": True, "table": tid})
     if t["room"]:
         v["room"] = room_public(t, s)
@@ -712,6 +755,8 @@ def watch_state(tid, wt, seat=None):
         room_housekeep(t)
         save_room(t)
         v = spectator_view(g, pov)
+        add_timing(v, g)
+        v["autoplay_in_sec"] = None
         v["fp"] = state_fp(g)
     v.update({"ok": True, "table": tid, "room": room_public(t)})
     return jsonify(v)
@@ -818,6 +863,7 @@ def act_view(g, s):
     v["fp"] = state_fp(g)
     v["slim"] = True
     add_drawn(v, g, s)
+    add_timing(v, g, s)
     return v
 
 
@@ -1051,6 +1097,7 @@ def api_start():
         save_room(t)
         v = E.view(t["state"], s)
         add_drawn(v, t["state"], s)
+        add_timing(v, t["state"], s)
         v.update({"ok": True, "table": t["id"], "room": room_public(t, s)})
         return jsonify(v)
 
@@ -1269,6 +1316,8 @@ button.a.hu{background:var(--gold);color:#3a2c00}
 /* ---- 观战席（2026-09-26）---- */
 .watchnote{width:100%;text-align:center;color:var(--dim);font-size:13px;padding:10px 0 6px}
 .watchnote b{color:var(--gold);font-weight:800;margin-right:6px}
+#cWho .ap{margin-left:6px;color:#ffd27a;font-weight:800}
+#cWho.warn{border-color:#e8a23a;background:rgba(120,60,0,.45);color:#fff;animation:breathe 1s ease-in-out infinite}
 #wlink{background:rgba(0,0,0,.35);border:1px solid rgba(255,255,255,.15);color:var(--fg);
  border-radius:16px;height:32px;padding:0 9px;font-size:12px;flex:0 0 auto;white-space:nowrap}
 @media (prefers-reduced-motion:reduce){
@@ -1759,17 +1808,33 @@ async function send(action,tile){
   busy=false;
 }
 function apply(j){
+  apAt=Date.now();
   if(j.phase==='waiting'){ S=j; renderWait(); return; }
   const wasWaiting = WAIT.classList.contains('on');
   WAIT.classList.remove('on');
   const old=(S&&S.phase==='waiting')?null:S; S=j;
   try{ if(wasWaiting) SFX.play('turn'); else sfxDiff(old,j); }catch(e){}
   let ev=null; try{ ev=MJFeel.pre(old,j); }catch(e){}
-  render();
+  render(); apTick();
   try{ MJFeel.post(ev); }catch(e){}
 }
 
 function rel(seat){ return ((seat - S.my_seat)%4+4)%4; }   // 0我 1右 2上 3左
+
+/* 托管倒计时：服务端给 autoplay_in_sec（收到那一刻离托管还剩几秒）。页面每次轮询成功都会续上心跳，
+   所以只有网络断了/请求一直失败时它才会往下走；最后 15 秒在顶栏自己名字旁显示。 */
+let apAt=0;
+function apTick(){
+  const el=document.getElementById('cWho'); if(!el||WATCH||!S||S.phase==='waiting') return;
+  let b=el.querySelector('.ap');
+  const left=(S.phase!=='over'&&S.autoplay_in_sec!=null)?Math.ceil(S.autoplay_in_sec-(Date.now()-apAt)/1000):null;
+  if(left!=null&&left<=15){
+    if(!b){ b=document.createElement('span'); b.className='ap'; el.appendChild(b); }
+    b.textContent=left>0?`⏱ ${left}s 后托管`:'⏱ 即将托管';
+    el.classList.add('warn');
+  }else{ if(b) b.remove(); el.classList.remove('warn'); }
+}
+setInterval(apTick,1000);
 
 /* 弃牌河字符墨迹居中：量一次，按 em 写进 #table 的 --gp*（见 .rt 的 CSS 注释） */
 function centerRiverGlyphs(){
