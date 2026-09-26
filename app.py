@@ -1444,7 +1444,7 @@ const MJFeel=(()=>{
   function route(n){
     if(!ctx) return false;
     if(n==='discard'){ if(now()-selfAt<900) return true; sound('pa',0.6); return true; }
-    if(n==='peng'||n==='gang') return true;
+    if(n==='peng') return true;   // 杠改放 gang.mp3（9/26）
     return false;
   }
 
@@ -1549,7 +1549,8 @@ const MJFeel=(()=>{
     const isGang=m.type.indexOf('gang')===0, v=m.me?1:0.6;
     const finish=()=>{
       g.style.opacity='';
-      sound(isGang?'gang':'peng',v); if(m.me) vib(isGang?30:20);
+      if(!isGang) sound('peng',v);   // 杠音改由 gang.mp3 负责（9/26），这里不再叠合成锣
+      if(m.me) vib(isGang?30:20);
       if(!canAnim(g)) return;
       g.querySelectorAll('i').forEach((el,j)=>el.animate(
         [{opacity:0,transform:'translateX(-7px) scale(.7)'},{opacity:1,transform:'translateX(0) scale(1)'}],
@@ -1638,12 +1639,14 @@ function lbl(t){ return t[0]+SUIT[t[1]]; }
 const SFX=(()=>{
   const names=['draw','discard','peng','gang','hu','turn'];
   const cache={};
-  names.forEach(n=>{ try{ const a=new Audio('/mj/static/sfx/'+n+'.wav'); a.preload='auto'; cache[n]=a; }catch(e){} });
+  const files={gang:'gang.mp3',hu:'hu.mp3'};   // 9/26 游选的：杠=level-up，胡=小提琴
+  names.forEach(n=>{ try{ const a=new Audio('/mj/static/sfx/'+(files[n]||n+'.wav')); a.preload='auto'; cache[n]=a; }catch(e){} });
   let muted=false; try{ muted=localStorage.getItem('mj_mute')==='1'; }catch(e){}
   window.__sfxLog=[];
   function play(n){
     window.__sfxLog.push(n);
     if(muted) return;
+    if(n==='zimo'){ play('gang'); setTimeout(()=>play('hu'),350); return; }
     try{ if(MJFeel.route(n)) return; }catch(e){}
     const a=cache[n]; if(!a) return;
     try{ a.currentTime=0; const p=a.play(); if(p&&p.catch) p.catch(()=>{}); }catch(e){}
@@ -1663,7 +1666,7 @@ function sfxDiff(a,b){
   const meH=s=>{const m=s.players.find(p=>p.is_me);return m?m.hand_count:0;};
   if(gangc(b)>gangc(a)) SFX.play('gang');
   else if(pengc(b)>pengc(a)) SFX.play('peng');
-  if(huc(b)>huc(a)) SFX.play('hu');
+  if(huc(b)>huc(a)){ const z=b.players.some(p=>p.hu&&p.hu.self_draw&&!((a.players.find(q=>q.seat===p.seat)||{}).hu)); SFX.play(z?'zimo':'hu'); }
   if(meT(b)&&!meT(a)){ if(meH(b)>meH(a)) SFX.play('draw'); SFX.play('turn'); }
   else if(b.last_discard && b.last_discard!==a.last_discard) SFX.play('discard');
 }
@@ -1883,7 +1886,7 @@ function oppHTML(p){
   const mel=p.melds.map(m=>`<span class="g">${m.tiles.map(x=>`<i>${emo(x)}</i>`).join('')}</span>`).join('');
   const que = p.que ? `<span class="que">缺${SUIT[p.que]}</span>`
     : (S.phase=='que' ? `<span class="que wait">定缺中</span>` : '');
-  return `<div class="pill ${turn}"><span class="dir">${WATCH?SEATN[p.seat]:DIRS[rel(p.seat)]}</span>${p.name}`+
+  return `<div class="pill ${turn}"><span class="dir">${SEATN[p.seat]}</span>${p.name}`+
     `${p.type=='bot'?' 🤖':(p.type=='api'?' 🕯️':'')} <span class="cnt">${p.hand_count}</span>${que}</div>`+
     `${mel?`<div class="omeld">${mel}</div>`:''}`+
     `<div class="backs ${vert}">${backs}</div>${hu}`;
@@ -1960,7 +1963,7 @@ function render(){
     document.getElementById('overS').innerHTML=S.players.map(p=>{
       const v=S.scores?S.scores[p.seat]:0;
       const hu=p.hu?`（${(p.hu.flags||[]).join('/')} ${p.hu.fan}番）`:'';
-      return `${WATCH?SEATN[p.seat]:DIRS[rel(p.seat)]} ${p.name} <b>${v>0?'+':''}${v}</b> ${hu}`;
+      return `${SEATN[p.seat]} ${p.name} <b>${v>0?'+':''}${v}</b> ${hu}`;
     }).join('<br>');
   }else{ ov.style.display='none'; }
 }
