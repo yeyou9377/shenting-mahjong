@@ -191,19 +191,24 @@ def next_alive(g, seat):
     return None
 
 
+def _is_que(p, tile):
+    """血战到底：本家缺门的牌不能碰、不能杠（碰了就永远胡不了）。9/26 游实战踩到。"""
+    return p.get("que") is not None and tile[1] == p["que"]
+
+
 def can_peng(p, tile):
-    return p["hand"].count(tile) >= 2
+    return (not _is_que(p, tile)) and p["hand"].count(tile) >= 2
 
 
 def can_ming_gang(p, tile):
-    return p["hand"].count(tile) >= 3
+    return (not _is_que(p, tile)) and p["hand"].count(tile) >= 3
 
 
 def self_gang_options(p):
     """轮到自己时可以杠的牌：暗杠(手上4张) + 补杠(已碰过且手上有第4张)。"""
     out = []
     for t, v in Counter(p["hand"]).items():
-        if v == 4:
+        if v == 4 and not _is_que(p, t):
             out.append({"tile": t, "kind": "an"})
     for m in p["melds"]:
         if m["type"] == "peng" and m["tile"] in p["hand"]:
