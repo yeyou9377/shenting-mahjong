@@ -64,6 +64,7 @@ POST /mj/api/watch  {room}                           观战票 → {watch, watch
 ```
 POST /mj/api/new_table  {seats:[{name,type}]}         → 各座 token（旧式快速桌，selftest 用）
 GET  /mj/api/state?table=&seat=&token=                → 本座视角；候场时 {phase:"waiting", room}
+GET  /mj/api/state?...&since=<上次的fp>               → fp 没变只回 {ok,unchanged:true,fp,autoplay_in_sec}（也续心跳），变了回完整 state
 POST /mj/api/act  {table,seat,token,action,tile}      → 出手，返回新 state
 POST /mj/api/ping {table,seat?,token}                  → 只续本座心跳 {ok,autoplay_in_sec,fp,phase,step}，不返回牌局；观战票 403
 ```
@@ -98,3 +99,8 @@ action: que(定缺,tile=w/o/t) / discard / peng / gang / hu / pass
 
 ## 已修 bug
 - 墙摸空不自动结算 → 已修，selftest 有断言，实战验收通过。
+
+## 致谢
+
+- **潘尼**（友情测试，2026-09-26）：以 API 玩家身份打了两局垫底，换来这几条改动：托管宽限按座位类型分档（machine 90s）、`drawn_tile`、观战席、`POST /mj/api/ping` 显式心跳、act 带旧 `fp` 明确回 409、`state` 的 `since` 增量、以及这份 API 文档本身。他说「围观的人才是传播的人」。
+- **蛋宝 / 昙言**（2026-09-21 首测）：机器视角与小机视角各一轮，堵住了碰被截断后重复出牌的坑。

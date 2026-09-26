@@ -696,6 +696,7 @@ def api_state():
     token = request.args.get("token", "")
     seat = request.args.get("seat")
     wt = request.args.get("watch", "")
+    since = request.args.get("since", "")[:80]
     if wt and not token:
         return watch_state(tid, wt, seat)
     with LOCK:
@@ -724,10 +725,13 @@ def api_state():
             save_room(t)
         else:
             save_table(tid, g)
+        fp = state_fp(g)
+        if since and since == fp:          # 局面没变：不拖全量（心跳已在上面续过）
+            return jsonify({"ok": True, "unchanged": True, "fp": fp, "autoplay_in_sec": autoplay_in_sec(g, s)})
         v = E.view(g, s)
         for p in v["players"]:
             p["partner_of"] = g["players"][p["seat"]].get("partner_of")
-        v["fp"] = state_fp(g)
+        v["fp"] = fp
         add_drawn(v, g, s)
         add_timing(v, g, s)
     v.update({"ok": True, "table": tid})
@@ -2248,7 +2252,7 @@ li{margin:3px 0}
 <div class="toc">
  <a href="#base">基本约定</a><a href="#flow">完整流程</a><a href="#tiles">牌的编码</a><a href="#lobby">大厅</a>
  <a href="#join">入座</a><a href="#wait">候场</a><a href="#state">state</a><a href="#actions">可选动作</a>
- <a href="#act">act</a><a href="#ping">ping</a><a href="#timeout">托管</a>
+ <a href="#act">act</a><a href="#ping">ping</a><a href="#since">since</a><a href="#timeout">托管</a>
  <a href="#over">终局</a><a href="#watch">观战</a><a href="#errors">错误码</a><a href="#curl">curl 全流程</a>
 </div>
 
@@ -2266,7 +2270,7 @@ li{margin:3px 0}
 <li><b>看大厅</b>：<code>GET /api/rooms</code> 拿公开房列表（可跳过）。</li>
 <li><b>入座</b>：<code>POST /api/join</code>（指定房号）或 <code>POST /api/queue</code>（快速加入，没房就替你开）或 <code>POST /api/rooms</code>（自己建房）。拿到 <code>room</code>、<code>seat</code>、<code>token</code>。只想看不想打：<code>POST /api/watch</code> 领观战票。</li>
 <li><b>候场</b>：轮询 <code>GET /api/state</code>，返回 <code>phase:"waiting"</code>。小机（<code>kind:"machine"</code>）入座即已准备；人类要 <code>POST /api/ready</code>。四座都准备 → 3 秒后自动开局；或房主 <code>POST /api/start</code>，空座笨机补。</li>
-<li><b>打牌</b>：轮询 <code>GET /api/state</code>；<code>available_actions</code> 非空时，挑一个 <code>POST /api/act</code>。</li>
+<li><b>打牌</b>：轮询 <code>GET /api/state</code>（建议带 <code>since</code>，见下）；<code>available_actions</code> 非空时，挑一个 <code>POST /api/act</code>。</li>
 <li><b>终局</b>：<code>phase:"over"</code>，看 <code>scores</code> 和 <code>over_reason</code>，停止轮询。</li>
 </ol>
 <div class="note">轮询间隔建议 1～3 秒。<b>任何一次 state / act / ping 请求都算心跳</b>；小机/API 座连续 __MACHINE_T__ 秒没有请求会被笨机托管（见 <a href="#timeout">托管</a>）。</div>
@@ -2335,8 +2339,8 @@ li{margin:3px 0}
 </ul>
 
 <h2 id="state">GET /api/state（牌局视角）</h2>
-<p><span class="m g">GET</span><code>/api/state?table=&lt;房号&gt;&amp;token=&lt;token&gt;[&amp;seat=&lt;座位&gt;]</code><br>
-<code>seat</code> 可省（token 已决定座位；给了就必须对得上，否则 403）。</p>
+<p><span class="m g">GET</span><code>/api/state?table=&lt;房号&gt;&amp;token=&lt;token&gt;[&amp;seat=&lt;座位&gt;][&amp;since=&lt;fp&gt;]</code><br>
+<code>seat</code> 可省（token 已决定座位；给了就必须对得上，否则 403）。<code>since</code> 见 <a href="#since">since</a>。</p>
 <div class="tw"><table><tr><th>字段</th><th>说明</th></tr>
 <tr><td><code>phase</code></td><td><code>que</code> 定缺 / <code>play</code> 打牌 / <code>over</code> 终局</td></tr>
 <tr><td><code>step</code></td><td><code>wait_que</code> / <code>discard</code>（轮到 <code>turn</code> 出牌）/ <code>claim</code>（有人打出牌，等碰杠胡表态）/ <code>over</code></td></tr>
@@ -2411,6 +2415,15 @@ li{margin:3px 0}
 <li>思考很久（比如在想一手牌）时可以用它保活；平时轮询 state 本身就是心跳，不需要额外 ping。</li>
 </ul>
 
+<h2 id="since">state 的 since 参数（省流量轮询）</h2>
+<p><code>GET /api/state?table=&amp;token=&amp;since=&lt;上次拿到的 fp&gt;</code></p>
+<ul>
+<li>局面指纹没变 → 只回 <code>{"ok":true, "unchanged":true, "fp":"...", "autoplay_in_sec":88}</code>，同样算心跳。</li>
+<li>变了 → 返回完整 state（和不带 since 一样）。</li>
+<li>候场阶段没有指纹，总是返回完整候场响应。</li>
+<li>指纹只跟牌局进程走（出牌、碰杠胡、定缺、表态、摸牌）；别家托管状态之类的变化不改变指纹。需要时不带 since 拉一次全量。</li>
+</ul>
+
 <h2 id="timeout">托管与断线</h2>
 <div class="tw"><table><tr><th>座位类型</th><th>多久没请求被托管</th></tr>
 <tr><td>真人座（human）</td><td>__PLAYER_T__ 秒</td></tr>
@@ -2469,6 +2482,9 @@ R=123456; T=&lt;token&gt;
 
 # 3. 候场/牌局轮询（全量）
 curl -s -H "$UA" "$B/api/state?table=$R&amp;token=$T"
+
+# 4. 省流量轮询：fp 没变只回 unchanged
+curl -s -H "$UA" "$B/api/state?table=$R&amp;token=$T&amp;since=&lt;上次的fp&gt;"
 
 # 5. 定缺 / 出牌 / 碰 / 过（带 fp + request_id）
 curl -s -H "$UA" -H "$J" -X POST $B/api/act \
