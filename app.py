@@ -1103,7 +1103,11 @@ body{margin:0;color:var(--fg);overflow:hidden;
  width:calc(100% - 2*(28px + var(--sideW)) - 8px);max-width:120px}
 .rt{display:inline-flex;align-items:center;justify-content:center;width:var(--tw);height:var(--th);
  font-size:var(--rt);line-height:1;filter:drop-shadow(0 1px 1px rgba(0,0,0,.5));
- background:rgba(253,252,245,.92);color:#111;border-radius:4px;padding:0}
+ background:rgba(253,252,245,.92);color:#111;border-radius:4px;
+ padding:var(--gpt,0) var(--gpr,0) var(--gpb,0) var(--gpl,0)}
+/* 弃牌河居中（2026-09-26）：麻将字符的"墨迹"在各家字体里并不在字形盒中央（手机实测反馈偏上偏左；桌面 Chromium/WebKit 量得偏下 0.12~0.18em），
+   纯 CSS 的 flex 居中只能居中字形盒。页面加载时用 canvas measureText 量出真实墨迹偏移，写进 --gp* 四个变量，
+   用非对称内边距把墨迹推回牌框正中。border-box + 固定宽高，牌的尺寸不变。只作用于 .rt（河牌 + 飞行中的影子）。 */
 .rt.hot{background:rgba(232,196,106,.95);outline:2px solid #fff3d0}
 .pill .que{background:rgba(232,196,106,.22);border:1px solid rgba(232,196,106,.55);color:#f6e2a4;
  border-radius:10px;padding:0 6px;font-size:11px;font-weight:700}
@@ -1725,6 +1729,45 @@ function apply(j){
 }
 
 function rel(seat){ return ((seat - S.my_seat)%4+4)%4; }   // 0我 1右 2上 3左
+
+/* 弃牌河字符墨迹居中：量一次，按 em 写进 #table 的 --gp*（见 .rt 的 CSS 注释） */
+function centerRiverGlyphs(){
+  try{
+    const host=document.getElementById('river'); if(!host) return;
+    const probe=document.createElement('span'); probe.className='rt';
+    probe.style.cssText='position:absolute;left:0;top:0;visibility:hidden;padding:0';
+    const inner=document.createElement('span'), mark=document.createElement('i');
+    mark.style.cssText='display:inline-block;width:0;height:0;vertical-align:baseline';
+    probe.appendChild(inner); host.appendChild(probe);
+    const cs=getComputedStyle(probe), fs=parseFloat(cs.fontSize)||1;
+    const c=document.createElement('canvas').getContext('2d');
+    c.font=cs.fontStyle+' '+cs.fontWeight+' '+cs.fontSize+' '+cs.fontFamily; c.textBaseline='alphabetic'; c.textAlign='left';
+    const glyphs=['🀇','🀙','🀐','🀋','🀝','🀔'];
+    let sx=0, sy=0, n=0;
+    glyphs.forEach(g=>{
+      inner.textContent=g; inner.appendChild(mark);
+      const m=c.measureText(g);
+      if(m.actualBoundingBoxAscent==null||m.actualBoundingBoxRight==null) return;
+      const box=probe.getBoundingClientRect(), gl=inner.getBoundingClientRect().left, base=mark.getBoundingClientRect().bottom;
+      const inkL=gl-m.actualBoundingBoxLeft, inkR=gl+m.actualBoundingBoxRight;
+      const inkT=base-m.actualBoundingBoxAscent, inkB=base+m.actualBoundingBoxDescent;
+      if(!(inkR>inkL&&inkB>inkT)) return;
+      sx+=(inkL+inkR)/2-(box.left+box.width/2); sy+=(inkT+inkB)/2-(box.top+box.height/2); n++;
+    });
+    host.removeChild(probe);
+    if(!n) return;
+    const dx=sx/n/fs, dy=sy/n/fs;               // 墨迹中心相对牌框中心的偏移（em；正=偏右/偏下）
+    if(Math.abs(dx)>0.4||Math.abs(dy)>0.4) return;  // 量得离谱就别动
+    const T=document.getElementById('table').style;
+    const em=v=>(Math.max(0,v)*2).toFixed(3)+'em';
+    T.setProperty('--gpl',em(-dx)); T.setProperty('--gpr',em(dx));
+    T.setProperty('--gpt',em(-dy)); T.setProperty('--gpb',em(dy));
+    window.__rtCenter={dx:+dx.toFixed(3),dy:+dy.toFixed(3),n};
+  }catch(e){}
+}
+centerRiverGlyphs();
+try{ if(document.fonts&&document.fonts.ready) document.fonts.ready.then(()=>{ const T=document.getElementById('table').style;
+  ['--gpl','--gpr','--gpt','--gpb'].forEach(k=>T.removeProperty(k)); centerRiverGlyphs(); }); }catch(e){}
 
 function oppHTML(p){
   const turn=p.is_turn?'turn':'';
