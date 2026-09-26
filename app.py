@@ -1092,6 +1092,35 @@ button.a.hu{background:var(--gold);color:#3a2c00}
 #wfoot .row button{flex:1;background:rgba(0,0,0,.35);border:1px solid rgba(255,255,255,.18);color:var(--fg);
  border-radius:10px;padding:9px 4px;font-size:13px}
 #wlog{font-size:11px;color:var(--dim);text-align:center;opacity:.8;min-height:14px}
+/* ---- 对家牌背一行放下（2026-09-26）：绝对定位 + left:50% 时 shrink-to-fit 只有半桌宽，13 张被挤成两行 ---- */
+#seatTop{width:max-content}
+#seatTop .backs{flex-wrap:nowrap;gap:3px}
+#seatTop .backs .back{--bw:min(16px,calc((84vw - 42px)/14));width:var(--bw);height:calc(1.5*var(--bw))}
+
+/* ---- 手感：抬牌 / 落河 / 高亮 / 碰杠 / 胡字（2026-09-26）---- */
+.t{transition:transform .12s ease-out,box-shadow .12s ease-out}
+.t.on.lift{transform:translateY(-10px) scale(1.06);outline:2px solid #fff3d0;
+ box-shadow:0 9px 0 #b7ad92,0 14px 16px rgba(0,0,0,.5),0 0 12px 2px rgba(232,196,106,.75)}
+.t.gone{visibility:hidden}
+.rt.fz-me{background:#fff3cf;box-shadow:0 0 0 2px #e8c46a,0 0 9px 1px rgba(232,196,106,.85);animation:fzMe 1.5s linear forwards}
+.rt.fz-ot{box-shadow:0 0 0 2px #fff,0 0 8px 1px rgba(255,255,255,.65);animation:fzOt 1.5s linear forwards}
+@keyframes fzMe{0%,78%{box-shadow:0 0 0 2px #e8c46a,0 0 9px 1px rgba(232,196,106,.85)}100%{box-shadow:0 0 0 0 rgba(232,196,106,0),0 0 0 0 rgba(232,196,106,0)}}
+@keyframes fzOt{0%,78%{box-shadow:0 0 0 2px #fff,0 0 8px 1px rgba(255,255,255,.65)}100%{box-shadow:0 0 0 0 rgba(255,255,255,0),0 0 0 0 rgba(255,255,255,0)}}
+.fz-ghost{position:fixed;z-index:50;pointer-events:none;margin:0;will-change:transform}
+#mymeld .g i,.omeld .g i{font-style:normal;display:inline-block}
+#fzBig{position:fixed;inset:0;z-index:40;display:flex;flex-direction:column;align-items:center;justify-content:center;
+ pointer-events:none;text-align:center;
+ background:radial-gradient(ellipse 70% 32% at 50% 50%,rgba(6,26,16,.82) 0%,rgba(6,26,16,.55) 55%,rgba(6,26,16,0) 100%)}
+#fzBig[hidden]{display:none}
+#fzBig b{font:900 92px/1 -apple-system,"PingFang SC",system-ui,sans-serif;color:var(--gold);letter-spacing:4px;
+ text-shadow:0 0 28px rgba(232,196,106,.75),0 4px 0 #6b4c00,0 8px 24px rgba(0,0,0,.6)}
+#fzBig small{margin-top:10px;font-size:16px;color:#fff;text-shadow:0 2px 6px rgba(0,0,0,.7)}
+#fzBig.ot b{font-size:56px;color:#fff;text-shadow:0 0 18px rgba(255,255,255,.5),0 3px 0 rgba(0,0,0,.35),0 6px 18px rgba(0,0,0,.6)}
+#over.hold{visibility:hidden}
+@media (prefers-reduced-motion:reduce){
+ .t,.t.on.lift{transition:none}
+ .rt.fz-me,.rt.fz-ot{animation:none}
+}
 </style></head><body>
 <div id="wait">
  <div id="whead">
@@ -1118,7 +1147,7 @@ button.a.hu{background:var(--gold);color:#3a2c00}
    <span class="chip" id="cWall"></span>
    <span class="chip" id="cPhase"></span>
    <span class="grow"></span>
-   <button id="mute" onclick="toggleMute()">🔊</button>
+   <button id="mute" onclick="toggleMute()" title="音效（含震动）" aria-label="音效开关">🔊</button>
  </div>
  <div id="table">
    <div class="seat" id="seatTop"></div>
@@ -1141,8 +1170,254 @@ button.a.hu{background:var(--gold);color:#3a2c00}
  </div>
 </div>
 <script>
+/* ---------- 手感层（2026-09-26）：抬牌→落河、河里高亮、碰杠飞牌、胡字停顿、WebAudio 合成音、震动。
+   全部包在这个 IIFE 里，只暴露 MJFeel；主脚本在 apply() 里调 pre/post。开关 = 顶栏 🔊（mj_mute，音效+震动同一个）。 ---------- */
+const MJFeel=(()=>{
+  const mq=window.matchMedia?window.matchMedia('(prefers-reduced-motion: reduce)'):null;
+  const RM=()=>!!(mq&&mq.matches);
+  const canAnim=el=>el&&typeof el.animate==='function'&&!RM();
+  const now=()=>performance.now();
+  const muted=()=>{ try{ return SFX.get(); }catch(e){ return false; } };
+  const stats={osc:0,sounds:[]};
+  const FRESH_MS=1500;
+  let fresh={};            // seat -> {i,t0,me}：河里刚打出的那张
+  let lifted=null;         // {i,t}：抬起的手牌
+  let flight=null;         // {tile}：自己那张正在飞
+  let selfAt=-1e9;         // 上次自己出牌的时刻（压掉 sfxDiff 的重复「啪」和重复落地）
+  let holdUntil=0;         // 动画进行中：轮询先别重画
+
+  /* ---- 音频：首次手势里 resume + 静音 buffer 解锁（iOS Safari），之后全用合成 ---- */
+  let ctx=null, master=null, noiseBuf=null, primed=false;
+  function ac(){
+    if(ctx) return ctx;
+    const C=window.AudioContext||window.webkitAudioContext; if(!C) return null;
+    try{ ctx=new C(); master=ctx.createGain(); master.gain.value=0.9; master.connect(ctx.destination); }catch(e){ ctx=null; }
+    return ctx;
+  }
+  function unlock(){
+    const c=ac(); if(!c) return;
+    if(c.state!=='running'){ try{ const p=c.resume(); if(p&&p.catch) p.catch(()=>{}); }catch(e){} }
+    if(!primed){
+      try{ const b=c.createBuffer(1,1,22050), s=c.createBufferSource(); s.buffer=b; s.connect(c.destination); s.start(0); primed=true; }catch(e){}
+    }
+  }
+  ['pointerdown','touchend','click','keydown'].forEach(n=>document.addEventListener(n,unlock,{capture:true,passive:true}));
+  function live(){ if(muted()) return null; const c=ctx; if(!c) return null;
+    if(c.state!=='running'){ try{ c.resume(); }catch(e){} return c.state==='running'?c:null; } return c; }
+  function envGain(c,t,peak,att,dec){
+    const g=c.createGain(); g.gain.setValueAtTime(0.0001,t);
+    g.gain.exponentialRampToValueAtTime(peak,t+att); g.gain.exponentialRampToValueAtTime(0.0001,t+att+dec);
+    g.connect(master); return g;
+  }
+  function osc(c,type,f0,f1,t,dur,g){
+    const o=c.createOscillator(); o.type=type; o.frequency.setValueAtTime(f0,t);
+    if(f1) o.frequency.exponentialRampToValueAtTime(f1,t+dur*0.6);
+    o.connect(g); o.start(t); o.stop(t+dur); stats.osc++; return o;
+  }
+  function noise(c,t,dur,type,freq,q,g){
+    if(!noiseBuf){ const n=Math.floor(c.sampleRate*0.2); noiseBuf=c.createBuffer(1,n,c.sampleRate);
+      const d=noiseBuf.getChannelData(0); for(let i=0;i<n;i++) d[i]=Math.random()*2-1; }
+    const s=c.createBufferSource(); s.buffer=noiseBuf;
+    const f=c.createBiquadFilter(); f.type=type; f.frequency.value=freq; f.Q.value=q;
+    s.connect(f); f.connect(g); s.start(t); s.stop(t+dur);
+  }
+  const SND={
+    pa(v){ const c=live(); if(!c) return false; const t=c.currentTime+0.005;       // 啪：≤100ms
+      osc(c,'triangle',1250,240,t,0.08,envGain(c,t,0.45*v,0.002,0.07));
+      noise(c,t,0.06,'bandpass',2300,0.9,envGain(c,t,0.9*v,0.001,0.045)); return true; },
+    peng(v){ const c=live(); if(!c) return false; const t=c.currentTime+0.005;     // 短促双音
+      osc(c,'sine',740,0,t,0.09,envGain(c,t,0.35*v,0.004,0.08));
+      osc(c,'sine',988,0,t+0.1,0.1,envGain(c,t+0.1,0.35*v,0.004,0.09)); return true; },
+    gang(v){ const c=live(); if(!c) return false; const t=c.currentTime+0.005;     // 锣：165Hz 短衰减
+      osc(c,'sine',175,160,t,0.62,envGain(c,t,0.7*v,0.006,0.58));
+      osc(c,'triangle',455,440,t,0.34,envGain(c,t,0.16*v,0.004,0.3));
+      noise(c,t,0.07,'lowpass',420,0.7,envGain(c,t,0.5*v,0.002,0.06)); return true; }
+  };
+  function sound(n,v){ stats.sounds.push(n); try{ return SND[n](v==null?1:v); }catch(e){ return false; } }
+  function vib(ms){ if(muted()) return; try{ if(navigator.vibrate) navigator.vibrate(ms); }catch(e){} }
+  // SFX.play 的分流：啪/碰/杠有合成就走合成（碰杠声由落位时的动画负责），没有 AudioContext 才回落到 wav
+  function route(n){
+    if(!ctx) return false;
+    if(n==='discard'){ if(now()-selfAt<900) return true; sound('pa',0.6); return true; }
+    if(n==='peng'||n==='gang') return true;
+    return false;
+  }
+
+  /* ---- DOM 小工具 ---- */
+  const riverOf=seat=>document.querySelectorAll('#river .rt[data-s="'+seat+'"]');
+  const lastOf=seat=>{ const a=riverOf(seat); return a.length?a[a.length-1]:null; };
+  function meldGroup(seat,k){
+    if(S&&seat===S.my_seat) return document.querySelectorAll('#mymeld .g')[k]||null;
+    const id={1:'seatRight',2:'seatTop',3:'seatLeft'}[rel(seat)];
+    const box=id&&document.getElementById(id); if(!box) return null;
+    return box.querySelectorAll('.omeld .g')[k]||null;
+  }
+  function ghostAt(r,tile){
+    const g=document.createElement('span'); g.className='rt fz-ghost'; g.textContent=emo(tile);
+    g.style.left=r.left+'px'; g.style.top=r.top+'px'; g.style.width=r.width+'px'; g.style.height=r.height+'px';
+    document.getElementById('table').appendChild(g); return g;
+  }
+  const hold=ms=>{ holdUntil=Math.max(holdUntil,now()+ms); };
+
+  /* ---- 河里高亮：riverHTML 每次重画都问一次 ---- */
+  function cur(seat,i){ const f=fresh[seat]; return (f&&f.i===i&&now()-f.t0<FRESH_MS)?f:null; }
+  function rc(seat,i){ const f=cur(seat,i); return f?(f.me?' fz-me':' fz-ot'):''; }
+  function rs(seat,i){ const f=cur(seat,i); return f?' style="animation-delay:-'+Math.round(now()-f.t0)+'ms"':''; }
+  function expire(){
+    Object.keys(fresh).forEach(seat=>{ const f=fresh[seat]; const left=FRESH_MS-(now()-f.t0);
+      if(left<=0){ delete fresh[seat]; }
+      setTimeout(()=>{ const el=riverOf(seat)[f.i]; if(el&&!cur(+seat,f.i)) el.classList.remove('fz-me','fz-ot'); },Math.max(0,left)+30);
+    });
+  }
+
+  /* ---- 抬牌 → 确认 ---- */
+  function dropLift(){ lifted=null; document.querySelectorAll('#hand .t.lift').forEach(b=>b.classList.remove('lift')); }
+  document.addEventListener('pointerdown',e=>{ if(lifted&&!(e.target.closest&&e.target.closest('#hand'))) dropLift(); },{passive:true});
+  function tap(btn,i,tile){
+    unlock();
+    if(busy) return;
+    if(lifted&&lifted.i===i&&lifted.t===tile&&btn.classList.contains('lift')){ lifted=null; confirmDiscard(btn,tile); return; }
+    dropLift(); btn.classList.add('lift'); lifted={i,t:tile};
+  }
+  function confirmDiscard(btn,tile){
+    const me=S&&S.players.find(p=>p.is_me);
+    selfAt=now(); sound('pa',1); vib(15);
+    if(me) fresh[S.my_seat]={i:me.discards.length,t0:now(),me:true};
+    const zone=document.getElementById('zBot');
+    const ph=document.createElement('span'); ph.className='rt fz-me'; ph.dataset.s=S.my_seat; ph.dataset.t=tile;
+    ph.textContent=emo(tile); zone.appendChild(ph);
+    if(canAnim(ph)){
+      const a=btn.getBoundingClientRect(), b=ph.getBoundingClientRect();
+      ph.style.visibility='hidden';
+      const g=ghostAt(b,tile);
+      const dx=(a.left+a.width/2)-(b.left+b.width/2), dy=(a.top+a.height/2)-(b.top+b.height/2), s=a.width/b.width;
+      flight={tile}; hold(420);
+      const an=g.animate([
+        {transform:'translate('+dx+'px,'+dy+'px) scale('+s+')',filter:'drop-shadow(0 10px 10px rgba(0,0,0,.45))',offset:0},
+        {transform:'translate(0,0) scale(1.14)',filter:'drop-shadow(0 6px 6px rgba(0,0,0,.55))',offset:0.62},
+        {transform:'translate(0,0) scale(.95)',filter:'drop-shadow(0 2px 3px rgba(0,0,0,.5))',offset:0.82},
+        {transform:'translate(0,0) scale(1)',filter:'drop-shadow(0 1px 1px rgba(0,0,0,.5))',offset:1}
+      ],{duration:300,easing:'cubic-bezier(.25,.7,.3,1)'});   // 前 ~190ms 是飞，后面是落定回弹
+      const land=()=>{ g.remove(); const el=lastOf(S.my_seat); if(el&&el.dataset.t===tile) el.style.visibility=''; flight=null; };
+      an.onfinish=land; an.oncancel=land;
+    }
+    btn.classList.add('gone');
+    send('discard',tile);
+  }
+
+  /* ---- 状态 diff：pre 在 render 前（量旧 DOM 的源位置），post 在 render 后（放动画） ---- */
+  function pre(a,b){
+    const ev={disc:[],meld:[],hu:[],over:false};
+    if(!a||!b||!a.players||!b.players) return ev;
+    const t=now();
+    b.players.forEach(p=>{
+      const q=a.players.find(x=>x.seat===p.seat); if(!q) return;
+      if(p.discards.length>q.discards.length){
+        const i=p.discards.length-1, f=fresh[p.seat];
+        if(!(f&&f.i===i&&t-f.t0<FRESH_MS)) fresh[p.seat]={i,t0:t,me:!!p.is_me};
+        ev.disc.push({seat:p.seat,i,me:!!p.is_me});
+      }
+      p.melds.forEach((m,k)=>{
+        const om=q.melds[k];
+        if(om&&om.type===m.type) return;
+        if(om&&!(om.type==='peng'&&m.type==='gang_bu')) return;
+        let from=null;
+        if((m.type==='peng'||m.type==='gang_ming')&&a.last_discard===m.tile&&a.last_discard_seat!=null){
+          const src=lastOf(a.last_discard_seat); if(src&&src.dataset.t===m.tile) from=src.getBoundingClientRect();
+        }
+        ev.meld.push({seat:p.seat,k,type:m.type,tile:m.tile,from,me:!!p.is_me});
+      });
+      if(p.hu&&!q.hu) ev.hu.push({seat:p.seat,me:!!p.is_me,self:!!p.hu.self_draw,name:p.name});
+    });
+    ev.over=b.phase==='over'&&a.phase!=='over';
+    if(ev.meld.length) hold(1100);
+    if(ev.hu.length) hold(800);
+    return ev;
+  }
+  function reLift(){
+    if(!lifted) return;
+    const b=document.querySelectorAll('#hand .t')[lifted.i];
+    if(b&&b.classList.contains('on')&&b.dataset.t===lifted.t) b.classList.add('lift'); else lifted=null;
+  }
+  function meldFx(m){
+    const g=meldGroup(m.seat,m.k); if(!g) return;
+    const isGang=m.type.indexOf('gang')===0, v=m.me?1:0.6;
+    const finish=()=>{
+      g.style.opacity='';
+      sound(isGang?'gang':'peng',v); if(m.me) vib(isGang?30:20);
+      if(!canAnim(g)) return;
+      g.querySelectorAll('i').forEach((el,j)=>el.animate(
+        [{opacity:0,transform:'translateX(-7px) scale(.7)'},{opacity:1,transform:'translateX(0) scale(1)'}],
+        {duration:190,delay:j*40,easing:'cubic-bezier(.2,.8,.3,1.25)',fill:'backwards'}));
+      if(isGang){
+        const c=m.me?'0 0 18px 6px rgba(232,196,106,.95)':'0 0 10px 3px rgba(232,196,106,.7)';
+        g.animate([{boxShadow:'0 0 0 0 rgba(232,196,106,0)'},{boxShadow:c,offset:0.3},{boxShadow:'0 0 0 0 rgba(232,196,106,0)'}],
+          {duration:600,easing:'ease-out'});
+      }else if(m.me){
+        g.animate([{transform:'scale(1)'},{transform:'scale(1.08)',offset:0.4},{transform:'scale(1)'}],{duration:260,delay:120});
+      }
+    };
+    if(!canAnim(g)){ finish(); return; }
+    g.style.opacity='0';
+    const tiles=g.querySelectorAll('i'), tgt=tiles.length?tiles[tiles.length-1]:g;
+    if(m.from){
+      const r=tgt.getBoundingClientRect(), f=m.from;
+      const gh=ghostAt(f,m.tile);
+      const dx=(r.left+r.width/2)-(f.left+f.width/2), dy=(r.top+r.height/2)-(f.top+f.height/2);
+      const s=Math.max(0.45,Math.min(1.2,r.height/f.height)), lift=m.me?46:28, dur=m.me?300:240;
+      const an=gh.animate([
+        {transform:'translate(0,0) scale(1)',opacity:1},
+        {transform:'translate('+dx/2+'px,'+(dy/2-lift)+'px) scale('+((1+s)/2*1.12)+')',opacity:1,offset:0.5},
+        {transform:'translate('+dx+'px,'+dy+'px) scale('+s+')',opacity:0.9,offset:1}
+      ],{duration:dur,easing:'cubic-bezier(.35,.1,.3,1)'});
+      const done=()=>{ gh.remove(); finish(); };
+      an.onfinish=done; an.oncancel=done;
+    }else{ setTimeout(finish,40); }
+  }
+  function bigWord(h,ev){
+    let el=document.getElementById('fzBig');
+    if(!el){ el=document.createElement('div'); el.id='fzBig'; el.hidden=true; document.body.appendChild(el); }
+    el.className=h.me?'':'ot';
+    el.innerHTML='<b>'+(h.self?'自摸！':'胡！')+'</b>'+(h.me?'':'<small>'+h.name+'</small>');
+    el.hidden=false;
+    const ov=document.getElementById('over');
+    if(ev.over&&ov) ov.classList.add('hold');
+    const dur=700;
+    if(canAnim(el)){
+      el.animate([
+        {opacity:0,filter:'blur(12px)',transform:'scale(1.35)'},
+        {opacity:1,filter:'blur(0px)',transform:'scale(1)',offset:0.32},
+        {opacity:1,filter:'blur(0px)',transform:'scale(1.02)',offset:0.82},
+        {opacity:0,filter:'blur(4px)',transform:'scale(1.06)'}
+      ],{duration:dur,easing:'ease-out'});
+    }
+    setTimeout(()=>{
+      el.hidden=true;
+      if(ov&&ov.classList.contains('hold')){ ov.classList.remove('hold');
+        if(canAnim(ov)) ov.animate([{opacity:0},{opacity:1}],{duration:220,easing:'ease-out'}); }
+    },dur);
+  }
+  function post(ev){
+    if(flight){ const el=lastOf(S.my_seat); if(el&&el.dataset.t===flight.tile) el.style.visibility='hidden'; }
+    reLift(); expire();
+    if(!ev) return;
+    ev.disc.forEach(d=>{
+      if(d.me&&now()-selfAt<2500) return;          // 自己那张已经飞过了
+      const el=riverOf(d.seat)[d.i];
+      if(canAnim(el)) el.animate([{transform:'scale(1.3)',opacity:0},{transform:'scale(.95)',opacity:1,offset:0.7},
+        {transform:'scale(1)',opacity:1}],{duration:200,easing:'ease-out'});
+    });
+    ev.meld.forEach(meldFx);
+    if(ev.hu.length){ const h=ev.hu.find(x=>x.me)||ev.hu[0]; bigWord(h,ev); }
+  }
+  return {tap,pre,post,rc,rs,route,unlock,holding:()=>now()<holdUntil,
+    stats,ctxState:()=>ctx?ctx.state:'none'};
+})();
+</script>
+
+<script>
 const TABLE="__TABLE__", TOKEN="__TOKEN__";
-let S=null, busy=false;
+let S=null, busy=false, actSeq=0;
 const MELD={peng:"碰",gang_ming:"明杠",gang_an:"暗杠",gang_bu:"补杠"};
 const SUIT={w:"万",o:"筒",t:"条"};
 const DIRS=["南","西","北","东"];   // 相对方位：自己永远在南(底)，下家西(右)、对家北(上)、上家东(左)
@@ -1163,6 +1438,7 @@ const SFX=(()=>{
   function play(n){
     window.__sfxLog.push(n);
     if(muted) return;
+    try{ if(MJFeel.route(n)) return; }catch(e){}
     const a=cache[n]; if(!a) return;
     try{ a.currentTime=0; const p=a.play(); if(p&&p.catch) p.catch(()=>{}); }catch(e){}
   }
@@ -1170,7 +1446,7 @@ const SFX=(()=>{
     set:(m)=>{muted=m; try{localStorage.setItem('mj_mute',m?'1':'0');}catch(e){}},
     get:()=>muted};
 })();
-function toggleMute(){ SFX.set(!SFX.get()); document.getElementById('mute').textContent=SFX.get()?'🔇':'🔊'; }
+function toggleMute(){ SFX.set(!SFX.get()); MJFeel.unlock(); document.getElementById('mute').textContent=SFX.get()?'🔇':'🔊'; }
 
 function sfxDiff(a,b){
   if(!a||!b) return;
@@ -1187,10 +1463,12 @@ function sfxDiff(a,b){
 }
 
 async function pull(){
-  if(busy) return;
+  if(busy || MJFeel.holding()) return;
+  const seq=actSeq;
   try{
     const r=await fetch(`/mj/api/state?table=${TABLE}&token=${TOKEN}`);
     const j=await r.json();
+    if(busy || seq!==actSeq) return;     // 出手期间发出的轮询作废，免得旧状态盖住新状态/打断动画
     if(!j.ok){
       if(j.gone){ location.href='/mj/?gone=1'; return; }
       document.getElementById('msg').textContent=j.error; document.getElementById('wmsg').textContent=j.error; return; }
@@ -1281,7 +1559,7 @@ function renderWait(){
 }
 function rid(){ return Date.now().toString(36)+'-'+Math.random().toString(36).slice(2,10); }
 async function send(action,tile){
-  if(busy) return; busy=true;
+  if(busy) return; busy=true; actSeq++;
   document.getElementById('msg').textContent="…";
   // 幂等：同一 request_id + 上次看到的 fp；响应丢了自动重发一次，服务端不会重复出手
   const body=JSON.stringify({table:TABLE,token:TOKEN,action,tile,request_id:rid(),fp:S&&S.fp});
@@ -1291,11 +1569,11 @@ async function send(action,tile){
       const r=await fetch('/mj/api/act',{method:'POST',headers:{'Content-Type':'application/json'},body});
       const j=await r.json();
       done=true;
-      if(!j.ok){ document.getElementById('msg').textContent="✗ "+j.error; }
+      if(!j.ok){ document.getElementById('msg').textContent="✗ "+j.error; try{ render(); }catch(e){} }
       else { document.getElementById('msg').textContent=""; apply(j); }
     }catch(e){
       if(attempt===0){ document.getElementById('msg').textContent="网络卡了，重试中…"; await new Promise(r=>setTimeout(r,700)); }
-      else document.getElementById('msg').textContent="网络卡了，再点一次";
+      else { document.getElementById('msg').textContent="网络卡了，再点一次"; try{ render(); }catch(e){} }
     }
   }
   busy=false;
@@ -1306,7 +1584,9 @@ function apply(j){
   WAIT.classList.remove('on');
   const old=(S&&S.phase==='waiting')?null:S; S=j;
   try{ if(wasWaiting) SFX.play('turn'); else sfxDiff(old,j); }catch(e){}
+  let ev=null; try{ ev=MJFeel.pre(old,j); }catch(e){}
   render();
+  try{ MJFeel.post(ev); }catch(e){}
 }
 
 function rel(seat){ return ((seat - S.my_seat)%4+4)%4; }   // 0我 1右 2上 3左
@@ -1316,7 +1596,7 @@ function oppHTML(p){
   const hu=p.hu?`<div class="ohu">🎉${(p.hu.flags||[]).join('/')} ${p.hu.fan}番</div>`:'';
   const backs=Array(p.hand_count).fill('<div class="back"></div>').join('');
   const vert=(rel(p.seat)!==2)?'vert':'';
-  const mel=p.melds.map(m=>`<span class="g">${m.tiles.map(emo).join('')}</span>`).join('');
+  const mel=p.melds.map(m=>`<span class="g">${m.tiles.map(x=>`<i>${emo(x)}</i>`).join('')}</span>`).join('');
   const que = p.que ? `<span class="que">缺${SUIT[p.que]}</span>`
     : (S.phase=='que' ? `<span class="que wait">定缺中</span>` : '');
   return `<div class="pill ${turn}"><span class="dir">${DIRS[rel(p.seat)]}</span>${p.name}`+
@@ -1326,7 +1606,7 @@ function oppHTML(p){
 }
 function riverHTML(p){
   const hot=(t,i)=> (p.seat===S.last_discard_seat && i===p.discards.length-1 && S.last_discard)?'hot':'';
-  return p.discards.map((t,i)=>`<span class="rt ${hot(t,i)}">${emo(t)}</span>`).join('');
+  return p.discards.map((t,i)=>`<span class="rt ${hot(t,i)}${MJFeel.rc(p.seat,i)}" data-s="${p.seat}" data-t="${t}"${MJFeel.rs(p.seat,i)}>${emo(t)}</span>`).join('');
 }
 
 function render(){
@@ -1373,12 +1653,12 @@ function render(){
 
   // 我的碰杠明牌区（手牌右侧、稍矮）
   document.getElementById('mymeld').innerHTML=(S.melds||[]).map(m=>
-     `<span class="g"><b>${MELD[m.type]}</b>${m.text}</span>`).join('');
+     `<span class="g"><b>${MELD[m.type]}</b>${m.text.split(' ').map(x=>`<i>${x}</i>`).join(' ')}</span>`).join('');
 
   // 手牌
-  document.getElementById('hand').innerHTML=S.hand_text.map(h=>{
+  document.getElementById('hand').innerHTML=S.hand_text.map((h,i)=>{
     const on=canDiscard&&canDiscard.has(h.t);
-    return `<button class="t ${on?'on':'off'}" ${on?`onclick="send('discard','${h.t}')"`:'disabled'}>
+    return `<button class="t ${on?'on':'off'}" data-t="${h.t}" ${on?`onclick="MJFeel.tap(this,${i},'${h.t}')"`:'disabled'}>
       <span class="e">${h.e}</span><small>${h.n}</small></button>`;
   }).join('');
 
