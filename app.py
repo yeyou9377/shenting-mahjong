@@ -142,6 +142,43 @@ def controlled_by_bot(p):
     return p.get("type") == "bot" or p.get("autoplay", False)
 
 
+# ---------- 本手摸牌（drawn_tile）----------
+# engine.py 不动：在 app 层包一下 E._draw_to（引擎内部按模块全局名调用，摸牌/杠后补张都经过它），
+# 把"谁、摸了哪张、摸完时的局面签名"记进 g["drawn"]。视角里只在签名仍吻合时给出，
+# 碰牌后轮到自己（没摸牌）、别人的回合、定缺阶段都是 null。庄家起手 14 张没有"摸"这一步，也是 null。
+_engine_draw_to = E._draw_to
+
+
+def _draw_sig(g):
+    return [len(g["deck"]), sum(len(p["melds"]) for p in g["players"]), g["hu_seq"]]
+
+
+def _draw_to_tracked(g, seat):
+    tile = g["deck"][0] if g["deck"] else None
+    _engine_draw_to(g, seat)
+    if tile is not None:
+        g["drawn"] = {"seat": seat, "tile": tile, "sig": _draw_sig(g)}
+
+
+E._draw_to = _draw_to_tracked
+
+
+def drawn_for(g, seat):
+    d = g.get("drawn")
+    if not d or g["phase"] != "play" or g["step"] != "discard" or g["turn"] != seat or d["seat"] != seat:
+        return None
+    if d["sig"] != _draw_sig(g) or d["tile"] not in g["players"][seat]["hand"]:
+        return None
+    return d["tile"]
+
+
+def add_drawn(v, g, seat):
+    t = drawn_for(g, seat)
+    v["drawn_tile"] = t
+    v["drawn_tile_text"] = E.tile_str(t) if t else None
+    return v
+
+
 def now():
     return datetime.now(CST).strftime("%Y-%m-%d %H:%M:%S")
 
@@ -531,7 +568,8 @@ def spectator_view(g, pov=0):
     在 E.view 的基础上把所有"本座私有"字段清空，并隐藏定缺阶段还没公开的缺门。"""
     v = E.view(g, pov)
     v.update({"spectator": True, "my_name": "观战", "my_que": None, "my_hu": None,
-              "hand": [], "hand_text": [], "melds": [], "available_actions": []})
+              "hand": [], "hand_text": [], "melds": [], "available_actions": [],
+              "drawn_tile": None, "drawn_tile_text": None})
     for p in v["players"]:
         p["is_me"] = False
         p["partner_of"] = g["players"][p["seat"]].get("partner_of")
@@ -640,6 +678,7 @@ def api_state():
         for p in v["players"]:
             p["partner_of"] = g["players"][p["seat"]].get("partner_of")
         v["fp"] = state_fp(g)
+        add_drawn(v, g, s)
     v.update({"ok": True, "table": tid})
     if t["room"]:
         v["room"] = room_public(t, s)
@@ -778,6 +817,7 @@ def act_view(g, s):
         h.pop("s", None)                  # s = e+n 的拼接，冗余
     v["fp"] = state_fp(g)
     v["slim"] = True
+    add_drawn(v, g, s)
     return v
 
 
@@ -1010,6 +1050,7 @@ def api_start():
         start_room(t)
         save_room(t)
         v = E.view(t["state"], s)
+        add_drawn(v, t["state"], s)
         v.update({"ok": True, "table": t["id"], "room": room_public(t, s)})
         return jsonify(v)
 

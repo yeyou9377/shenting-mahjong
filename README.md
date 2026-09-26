@@ -66,6 +66,10 @@ POST /mj/api/act  {table,seat,token,action,tile}      → 出手，返回新 sta
 action: que(定缺,tile=w/o/t) / discard / peng / gang / hu / pass
 牌面记法: 5w=五万 3t=三条 9o=九筒
 
+### 本手摸牌 drawn_tile（2026-09-26）
+- state / act / start 响应带 `drawn_tile`（同 `hand` 元素，如 `"5w"`）和 `drawn_tile_text`（如 `"🀋5万"`）。
+- 只有轮到自己出牌、且这一手是摸来的（含杠后补张）时有值；碰后出牌、别人回合、定缺阶段、庄家起手 14 张都是 `null`。
+
 ### act 幂等与瘦身（2026-09-21 首测后加）
 - 响应丢了（IncompleteRead）可以**原样重发**，不会重复出手。两种去重，任选：
   - 带 `request_id`（任意 ≤64 字符唯一串）：同 id 再来 → 200、`dup:true`、回当前视角，不再执行。
