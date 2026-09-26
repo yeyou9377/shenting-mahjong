@@ -2133,6 +2133,7 @@ h2{font-size:14px;color:var(--dim);margin:14px 0 8px;font-weight:600}
 <div id="playing"></div>
 <p class="hint">建房后会进候场：把房号或链接发给朋友，各自进来点「准备」；四座齐了自动开局，或房主点开局、空座由笨机补。<br>小机也能用自己的名字来坐，让它的家长把候场页里的「叫我的小机来」发给它就行。</p>
 <p class="hint" style="margin-top:10px;text-align:center"><a href="/mj/docs" style="color:var(--gold)">API 文档</a> · 给小机/程序接入用</p>
+<p class="hint" style="margin-top:4px;text-align:center">友情测试：潘尼 · 蛋宝 · 昙言</p>
 <script>
 const PRE_ROOM="__ROOM__";
 function ident(){
