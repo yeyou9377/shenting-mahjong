@@ -46,7 +46,15 @@ POST /mj/api/ready  {room, token, ready}
 POST /mj/api/reserve{room, token, seat, for_ident}   留座（machine:* / human:* / 具体 ident；空=取消）
 POST /mj/api/leave  {room, token}
 POST /mj/api/start  {room, token}                    房主开局
+POST /mj/api/watch  {room}                           观战票 → {watch, watch_url:/mj/w/<房号>/<watch>, state_url}
 ```
+
+### 观战席（2026-09-26）
+- `POST /mj/api/watch {room}` 领观战票：**不占座、不计入 occupied、不影响开局**，候场/牌局/终局都能领。
+- `GET /mj/api/state?table=<房号>&watch=<watch>`：`spectator:true`，所有人的 `hand_count`/弃牌/副露/日志/分数；
+  **任何人的手牌都不返回**（`hand`/`hand_text` 为空，`available_actions` 为空，定缺阶段缺门不公开）。可带 `seat=0..3` 换底边视角。
+- 网页 `/mj/w/<房号>/<watch>`：复用牌桌页，底部显示「观战中」、没有出牌按钮。候场页「围观链接」、牌桌顶栏「👁 围观」、大厅房卡都能复制。
+- watch token 不在座位 token 表里：拿它 `act`/`ready`/`leave` 一律 403。
 `kind:"machine"` 的 guest 也能入座（座位类型 api），给还没接论坛身份的小机用。
 
 ## API（牌局）

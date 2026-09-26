@@ -304,7 +304,8 @@ def room_public(t, my_seat=None):
            "host_seat": r["host_seat"], "host_name": (r["seats"][r["host_seat"]] or {}).get("name"),
            "settings": r["settings"], "seats": seats,
            "occupied": len(occ), "need": 4 - len(occ),
-           "created_at": r["created_at"], "log": r.get("log", [])[-8:]}
+           "created_at": r["created_at"], "log": r.get("log", [])[-8:],
+           "watching": len(r.get("watchers") or {})}
     if r.get("countdown_at"):
         out["countdown_left"] = max(0, ROOM_COUNTDOWN_SEC - int(time.time() - r["countdown_at"]))
     if t["state"]:
@@ -498,6 +499,52 @@ def room_reply(t, seat, extra=None):
     return jsonify(out)
 
 
+# ---------- 观战席：只读、不占座、不计入 occupied、不影响开局 ----------
+# room["watchers"] = {watch_token: {"created": ts, "last_seen": ts}}。watch token 不在 t["tokens"] 里，
+# 所以 act / ready / leave / 座位网页 全部天然 403/404。
+WATCH_MAX = 64
+
+
+def add_watcher(t):
+    ws = t["room"].setdefault("watchers", {})
+    tk = "w" + secrets.token_urlsafe(24)
+    ts = time.time()
+    ws[tk] = {"created": ts, "last_seen": ts}
+    if len(ws) > WATCH_MAX:          # 只留最近活跃的 WATCH_MAX 个
+        keep = sorted(ws.items(), key=lambda kv: kv[1]["last_seen"])[-WATCH_MAX:]
+        t["room"]["watchers"] = dict(keep)
+    return tk
+
+
+def watch_auth(tid, wt):
+    """→ (t, err)。只认新式房里登记过的观战 token。"""
+    t = load_table(tid)
+    if not t or not t["room"]:
+        return None, ("没有这个房", 404)
+    if not wt or wt not in (t["room"].get("watchers") or {}):
+        return None, ("观战链接不对或已失效", 403)
+    return t, None
+
+
+def spectator_view(g, pov=0):
+    """观战视角：以 pov 座为底边排版，但任何人的手牌都不给。
+    在 E.view 的基础上把所有"本座私有"字段清空，并隐藏定缺阶段还没公开的缺门。"""
+    v = E.view(g, pov)
+    v.update({"spectator": True, "my_name": "观战", "my_que": None, "my_hu": None,
+              "hand": [], "hand_text": [], "melds": [], "available_actions": []})
+    for p in v["players"]:
+        p["is_me"] = False
+        p["partner_of"] = g["players"][p["seat"]].get("partner_of")
+        if g["phase"] == "que":
+            p["que"] = None
+    return v
+
+
+def watch_urls(t, tk):
+    return {"watch": tk, "watch_url": f"/mj/w/{t['id']}/{tk}",
+            "state_url": f"/mj/api/state?table={t['id']}&watch={tk}"}
+
+
 # ---------- API ----------
 
 @app.route("/mj/api/health")
@@ -557,9 +604,12 @@ def api_new_table():
 
 @app.route("/mj/api/state")
 def api_state():
-    tid = request.args.get("table", "")
+    tid = request.args.get("table", "") or request.args.get("room", "")
     token = request.args.get("token", "")
     seat = request.args.get("seat")
+    wt = request.args.get("watch", "")
+    if wt and not token:
+        return watch_state(tid, wt, seat)
     with LOCK:
         t, s, err = auth(tid, seat, token)
         if err:
@@ -594,6 +644,60 @@ def api_state():
     if t["room"]:
         v["room"] = room_public(t, s)
     return jsonify(v)
+
+
+def watch_state(tid, wt, seat=None):
+    """观战者轮询：推进超时/笨机（和玩家轮询一样不会卡桌），但不 touch 任何座位。"""
+    try:
+        pov = int(seat) if seat not in (None, "") else 0
+    except (TypeError, ValueError):
+        pov = 0
+    pov = pov if 0 <= pov <= 3 else 0
+    with LOCK:
+        t, err = watch_auth(tid, wt)
+        if err:
+            return jsonify({"ok": False, "error": err[0], "gone": True}), err[1]
+        if room_housekeep(t) == "delete":
+            delete_table(tid)
+            return jsonify({"ok": False, "error": "房间已解散", "gone": True}), 410
+        w = t["room"]["watchers"].get(wt)
+        if w:
+            w["last_seen"] = time.time()
+        if t["phase"] == "waiting" or not t["state"]:
+            save_room(t)
+            return jsonify({"ok": True, "table": tid, "phase": "waiting", "spectator": True,
+                            "my_seat": pov, "hand": [], "hand_text": [], "room": room_public(t)})
+        g = t["state"]
+        apply_timeouts(g)
+        E.run_bots(g, limit=5000)
+        room_housekeep(t)
+        save_room(t)
+        v = spectator_view(g, pov)
+        v["fp"] = state_fp(g)
+    v.update({"ok": True, "table": tid, "room": room_public(t)})
+    return jsonify(v)
+
+
+@app.route("/mj/api/watch", methods=["POST"])
+def api_watch():
+    """领一张观战票：不占座、不计入 occupied、不影响开局。"""
+    allowed, reason = check_rate(request, 20)
+    if not allowed:
+        return jsonify({"ok": False, "error": reason}), 429
+    body = request.get_json(silent=True) or {}
+    code = str(body.get("room") or body.get("table") or "").strip()
+    with LOCK:
+        t = load_table(code)
+        if not t or not t["room"]:
+            return jsonify({"ok": False, "error": "没有这个房号"}), 404
+        if room_housekeep(t) == "delete":
+            delete_table(code)
+            return jsonify({"ok": False, "error": "房间已解散"}), 410
+        tk = add_watcher(t)
+        save_room(t)
+        out = {"ok": True, "room": t["id"], "table": t["id"], "phase": eff_phase(t)}
+        out.update(watch_urls(t, tk))
+        return jsonify(out)
 
 
 @app.route("/mj/api/act", methods=["POST"])
@@ -1117,6 +1221,11 @@ button.a.hu{background:var(--gold);color:#3a2c00}
 #fzBig small{margin-top:10px;font-size:16px;color:#fff;text-shadow:0 2px 6px rgba(0,0,0,.7)}
 #fzBig.ot b{font-size:56px;color:#fff;text-shadow:0 0 18px rgba(255,255,255,.5),0 3px 0 rgba(0,0,0,.35),0 6px 18px rgba(0,0,0,.6)}
 #over.hold{visibility:hidden}
+/* ---- 观战席（2026-09-26）---- */
+.watchnote{width:100%;text-align:center;color:var(--dim);font-size:13px;padding:10px 0 6px}
+.watchnote b{color:var(--gold);font-weight:800;margin-right:6px}
+#wlink{background:rgba(0,0,0,.35);border:1px solid rgba(255,255,255,.15);color:var(--fg);
+ border-radius:16px;height:32px;padding:0 9px;font-size:12px;flex:0 0 auto;white-space:nowrap}
 @media (prefers-reduced-motion:reduce){
  .t,.t.on.lift{transition:none}
  .rt.fz-me,.rt.fz-ot{animation:none}
@@ -1137,6 +1246,7 @@ button.a.hu{background:var(--gold);color:#3a2c00}
   <div class="row">
    <button onclick="shareRoom(this)">分享链接</button>
    <button onclick="inviteBot(this)">叫我的小机来</button>
+   <button onclick="copyWatch(this)">围观链接</button>
   </div>
   <div id="wlog"></div>
  </div>
@@ -1147,6 +1257,7 @@ button.a.hu{background:var(--gold);color:#3a2c00}
    <span class="chip" id="cWall"></span>
    <span class="chip" id="cPhase"></span>
    <span class="grow"></span>
+   <button id="wlink" onclick="copyWatch(this)" title="复制围观链接">👁 围观</button>
    <button id="mute" onclick="toggleMute()" title="音效（含震动）" aria-label="音效开关">🔊</button>
  </div>
  <div id="table">
@@ -1416,10 +1527,11 @@ const MJFeel=(()=>{
 </script>
 
 <script>
-const TABLE="__TABLE__", TOKEN="__TOKEN__";
+const TABLE="__TABLE__", TOKEN="__TOKEN__", WATCH="__WATCH__";   // WATCH 非空 = 观战页（只读）
 let S=null, busy=false, actSeq=0;
 const MELD={peng:"碰",gang_ming:"明杠",gang_an:"暗杠",gang_bu:"补杠"};
 const SUIT={w:"万",o:"筒",t:"条"};
+const SEATN=["东","南","西","北"];   // 观战页用绝对座位名（没有"我"，相对方位没意义）
 const DIRS=["南","西","北","东"];   // 相对方位：自己永远在南(底)，下家西(右)、对家北(上)、上家东(左)
 const EMO={
  w:['','🀇','🀈','🀉','🀊','🀋','🀌','🀍','🀎','🀏'],
@@ -1466,7 +1578,7 @@ async function pull(){
   if(busy || MJFeel.holding()) return;
   const seq=actSeq;
   try{
-    const r=await fetch(`/mj/api/state?table=${TABLE}&token=${TOKEN}`);
+    const r=await fetch(WATCH?`/mj/api/state?table=${TABLE}&watch=${WATCH}`:`/mj/api/state?table=${TABLE}&token=${TOKEN}`);
     const j=await r.json();
     if(busy || seq!==actSeq) return;     // 出手期间发出的轮询作废，免得旧状态盖住新状态/打断动画
     if(!j.ok){
@@ -1489,6 +1601,18 @@ async function copyText(text,btn,done){
   if(btn){ btn.textContent=done||'已复制 ✓'; setTimeout(()=>btn.textContent=old,1500); }
 }
 function roomLink(){ return location.origin+'/mj/r/'+TABLE; }
+let watchURL=WATCH?location.origin+'/mj/w/'+TABLE+'/'+WATCH:'';
+async function copyWatch(btn){
+  if(!watchURL){
+    try{
+      const r=await fetch('/mj/api/watch',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({room:TABLE})});
+      const j=await r.json();
+      if(!j.ok){ document.getElementById('msg').textContent=j.error; document.getElementById('wmsg').textContent=j.error; return; }
+      watchURL=location.origin+j.watch_url;
+    }catch(e){ return; }
+  }
+  copyText(`神庭麻将 ${TABLE} 房，来围观（只看不打，看不到任何人的手牌）：${watchURL}`,btn,'已复制围观链接');
+}
 async function shareRoom(btn){
   const text=`来神庭麻将打一局，房号 ${TABLE}：${roomLink()}`;
   if(navigator.share){ try{ await navigator.share({title:'神庭麻将',text}); return; }catch(e){} }
@@ -1516,13 +1640,15 @@ async function startGame(){
   apply(j);
 }
 async function leaveRoom(){
+  if(WATCH){ location.href='/mj/'; return; }
   if(!confirm('离开这一桌？')) return;
   await roomPost('leave'); location.href='/mj/';
 }
 function seatHTML(s,pos,r){
-  const isMe=s.seat===S.my_seat;
+  const isMe=!WATCH&&s.seat===S.my_seat;
   const cls=['ws','wpos'+pos, isMe?'me':'', s.state==='empty'?'empty':'', s.state==='ready'?'ready':''].join(' ');
   if(s.state==='empty'){
+    if(WATCH) return `<div class="${cls}"><span class="dir">${s.dir}</span><div class="av">◯</div><div class="nm">空座</div><div class="st">等人来</div></div>`;
     return `<div class="${cls}" onclick="sitAt(${s.seat})"><span class="dir">${s.dir}</span><div class="av">◯</div><div class="nm">空座</div><div class="st">点我换到这</div></div>`;
   }
   if(s.state==='reserved'){
@@ -1547,6 +1673,15 @@ function renderWait(){
   const mid = r.countdown_left!=null ? `<b>${r.countdown_left} 秒后开局</b>四座齐了`
     : (r.need>0 ? `<b>${r.occupied}/4</b>还差 ${r.need} 人<br><small>空座开局由笨机补</small>` : `<b>4/4</b>等大家准备`);
   document.getElementById('wfelt').innerHTML=html+`<div id="wmid">${mid}</div>`;
+  if(WATCH){
+    document.getElementById('wready').style.display='none';
+    document.getElementById('wstart').style.display='none';
+    document.querySelector('#whead .leave').textContent='‹ 大厅';
+    document.querySelectorAll('#wfoot .row button').forEach(b=>{ if(!/围观/.test(b.textContent)) b.style.display='none'; });
+    document.getElementById('wmsg').textContent=`👁 观战中${r.watching?' · '+r.watching+' 人在看':''} · 开局后自动切到牌桌`;
+    document.getElementById('wlog').textContent=(r.log||[]).slice(-2).join(' · ');
+    return;
+  }
   const me=r.seats[S.my_seat]||{};
   const rb=document.getElementById('wready');
   rb.textContent = me.state==='ready' ? '取消准备' : '准 备';
@@ -1599,7 +1734,7 @@ function oppHTML(p){
   const mel=p.melds.map(m=>`<span class="g">${m.tiles.map(x=>`<i>${emo(x)}</i>`).join('')}</span>`).join('');
   const que = p.que ? `<span class="que">缺${SUIT[p.que]}</span>`
     : (S.phase=='que' ? `<span class="que wait">定缺中</span>` : '');
-  return `<div class="pill ${turn}"><span class="dir">${DIRS[rel(p.seat)]}</span>${p.name}`+
+  return `<div class="pill ${turn}"><span class="dir">${WATCH?SEATN[p.seat]:DIRS[rel(p.seat)]}</span>${p.name}`+
     `${p.type=='bot'?' 🤖':(p.type=='api'?' 🕯️':'')} <span class="cnt">${p.hand_count}</span>${que}</div>`+
     `${mel?`<div class="omeld">${mel}</div>`:''}`+
     `<div class="backs ${vert}">${backs}</div>${hu}`;
@@ -1610,8 +1745,8 @@ function riverHTML(p){
 }
 
 function render(){
-  const me=S.players.find(p=>p.is_me);
-  document.getElementById('cWho').textContent='🀄️ '+S.my_name+(S.my_que?`·缺${SUIT[S.my_que]}`:'');
+  const me=WATCH?S.players[S.my_seat]:S.players.find(p=>p.is_me);   // 观战：底边那家
+  document.getElementById('cWho').textContent=WATCH?'👁 观战':('🀄️ '+S.my_name+(S.my_que?`·缺${SUIT[S.my_que]}`:''));
   document.getElementById('cWall').textContent='墙 '+S.wall;
   document.getElementById('cPhase').textContent=
     S.phase=='que'?'定缺中':(S.phase=='over'?'本局结束':(S.step=='claim'?'抢牌中':'进行中'));
@@ -1652,10 +1787,16 @@ function render(){
   document.getElementById('acts').innerHTML=btns.join('');
 
   // 我的碰杠明牌区（手牌右侧、稍矮）
-  document.getElementById('mymeld').innerHTML=(S.melds||[]).map(m=>
+  document.getElementById('mymeld').innerHTML=((WATCH?(me&&me.melds):S.melds)||[]).map(m=>
      `<span class="g"><b>${MELD[m.type]}</b>${m.text.split(' ').map(x=>`<i>${x}</i>`).join(' ')}</span>`).join('');
 
-  // 手牌
+  // 手牌（观战：谁的手牌都不给，只写一行「观战中」）
+  if(WATCH){
+    const q=me&&me.que?` · 缺${SUIT[me.que]}`:'';
+    const tag=me?(me.type=='bot'?' 🤖':(me.type=='api'?' 🕯️':''))+(me.autoplay?' · 托管中':''):'';
+    const hu=me&&me.hu?` · 🎉${(me.hu.flags||[]).join('/')} ${me.hu.fan}番`:'';
+    document.getElementById('hand').innerHTML=`<div class="watchnote"><b>👁 观战中</b>底边：${me?['东','南','西','北'][me.seat]+'座':''} ${me?me.name:''}${tag}${q} · ${me?me.hand_count:0} 张${hu}</div>`;
+  }else
   document.getElementById('hand').innerHTML=S.hand_text.map((h,i)=>{
     const on=canDiscard&&canDiscard.has(h.t);
     return `<button class="t ${on?'on':'off'}" data-t="${h.t}" ${on?`onclick="MJFeel.tap(this,${i},'${h.t}')"`:'disabled'}>
@@ -1670,7 +1811,7 @@ function render(){
     document.getElementById('overS').innerHTML=S.players.map(p=>{
       const v=S.scores?S.scores[p.seat]:0;
       const hu=p.hu?`（${(p.hu.flags||[]).join('/')} ${p.hu.fan}番）`:'';
-      return `${DIRS[rel(p.seat)]} ${p.name} <b>${v>0?'+':''}${v}</b> ${hu}`;
+      return `${WATCH?SEATN[p.seat]:DIRS[rel(p.seat)]} ${p.name} <b>${v>0?'+':''}${v}</b> ${hu}`;
     }).join('<br>');
   }else{ ov.style.display='none'; }
 }
@@ -1692,8 +1833,19 @@ def web_seat(tid, token):
         name = t["state"]["players"][seat]["name"]
     else:
         name = (t["room"]["seats"][seat] or {}).get("name", "")
-    html = (PAGE.replace("__TABLE__", tid).replace("__TOKEN__", token)
+    html = (PAGE.replace("__TABLE__", tid).replace("__TOKEN__", token).replace("__WATCH__", "")
                 .replace("__NAME__", name))
+    return Response(html, mimetype="text/html; charset=utf-8")
+
+
+@app.route("/mj/w/<tid>/<wt>")
+def web_watch(tid, wt):
+    """观战页：复用牌桌页，TOKEN 为空、WATCH 为观战票；底部不出手牌、没有按钮。"""
+    t, err = watch_auth(tid, wt)
+    if err:
+        return Response(GONE_PAGE, mimetype="text/html; charset=utf-8", status=404)
+    html = (PAGE.replace("__TABLE__", tid).replace("__TOKEN__", "").replace("__WATCH__", wt)
+                .replace("__NAME__", "观战 " + tid))
     return Response(html, mimetype="text/html; charset=utf-8")
 
 
@@ -1741,6 +1893,7 @@ h2{font-size:14px;color:var(--dim);margin:14px 0 8px;font-weight:600}
 .seat .dir{display:inline-block;width:16px;color:var(--dim);opacity:.7}
 .room .act{display:flex;gap:8px;align-items:center}
 .room .act button{width:100%;padding:9px}
+.room .act button.w{width:auto;flex:0 0 auto;padding:9px 12px;font-size:13px}
 .empty{color:var(--dim);font-size:14px;padding:18px 8px;text-align:center;border:1px dashed var(--line);border-radius:12px}
 #msg{color:var(--gold);font-size:13px;min-height:18px;margin-bottom:6px}
 .hint{color:var(--dim);font-size:12px;margin-top:18px;line-height:1.6}
@@ -1799,6 +1952,14 @@ async function joinCode(btn){
   goSeat(await post('join',{room:code},btn));
 }
 async function joinRoom(code,btn){ goSeat(await post('join',{room:code},btn)); }
+// 观战：领一张观战票（不占座），进只读牌桌 / 复制链接
+async function watchRoom(code,btn){ const j=await post('watch',{room:code},btn); if(j&&j.watch_url) location.href=j.watch_url; }
+async function copyWatch(code,btn){
+  const j=await post('watch',{room:code},btn); if(!j||!j.watch_url) return;
+  const url=location.origin+j.watch_url, old=btn.textContent;
+  try{ await navigator.clipboard.writeText(url); }catch(e){ window.prompt('复制这段：',url); }
+  btn.textContent='已复制 ✓'; setTimeout(()=>btn.textContent=old,1500);
+}
 
 function seatLine(s){
   if(s.state==='empty') return `<div class="seat"><span class="dir">${s.dir}</span>◯ 空</div>`;
@@ -1810,12 +1971,13 @@ function seatLine(s){
 function card(r,hi){
   const seats=r.seats.map(seatLine).join('');
   if(r.phase==='playing'){
-    return `<div class="room"><div class="t"><span class="nm">${r.name}</span><span class="cd">${r.room}</span><span class="need">打牌中 · 墙 ${r.wall}</span></div><div class="seats">${seats}</div></div>`;
+    return `<div class="room"><div class="t"><span class="nm">${r.name}</span><span class="cd">${r.room}</span><span class="need">打牌中 · 墙 ${r.wall}</span></div><div class="seats">${seats}</div>
+    <div class="act"><button class="ghost" onclick="watchRoom('${r.room}',this)">👁 围观${r.watching?' ('+r.watching+')':''}</button><button class="ghost w" onclick="copyWatch('${r.room}',this)">复制围观链接</button></div></div>`;
   }
   const can=r.need>0;
   return `<div class="room ${hi?'hi':''}"><div class="t"><span class="nm">${r.name}</span><span class="cd">${r.room}</span><span class="need">${can?'差 '+r.need+' 人':'满员待开'}</span></div>
     <div class="seats">${seats}</div>
-    <div class="act"><button ${can?'':'disabled'} onclick="joinRoom('${r.room}',this)">${can?'加入这局':'满了'}</button></div></div>`;
+    <div class="act"><button ${can?'':'disabled'} onclick="joinRoom('${r.room}',this)">${can?'加入这局':'满了'}</button><button class="ghost w" onclick="watchRoom('${r.room}',this)">👁 围观</button><button class="ghost w" onclick="copyWatch('${r.room}',this)">围观链接</button></div></div>`;
 }
 async function refresh(){
   try{
