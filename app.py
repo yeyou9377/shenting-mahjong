@@ -158,6 +158,14 @@ def add_timing(v, g, seat=None):
     return v
 
 
+def autoplay_in_sec(g, seat):
+    """本座离被托管还剩几秒（同 add_timing 的口径）；bot / 已托管 / 终局 → None。"""
+    if g.get("phase") == "over":
+        return None
+    dl = autoplay_deadline(g["players"][seat])
+    return None if dl is None else max(0, int(math.ceil(dl - time.time())))
+
+
 def apply_timeouts(g):
     """将长时间没有请求的真人/API座位交给笨 bot，避免全桌陪等。宽限按座位类型分档，入座/开局后有保护期。"""
     if g.get("phase") == "over":
@@ -833,6 +841,45 @@ def api_act():
         v = act_view(g, s)
     v.update({"ok": True, "table": tid, "dup": bool(dup)})
     return jsonify(v)
+
+
+@app.route("/mj/api/ping", methods=["POST"])
+def api_ping():
+    """显式心跳：只续本座心跳（解除/延后托管），不返回牌局。观战票不能 ping。"""
+    body = request.get_json(silent=True) or {}
+    tid = str(body.get("table") or body.get("room") or "")
+    token = body.get("token") or ""
+    seat = body.get("seat")
+    with LOCK:
+        if not token and body.get("watch"):
+            return jsonify({"ok": False, "error": "观战票不能 ping"}), 403
+        t, s, err = auth(tid, seat, token)
+        if err:
+            if t is None and err[1] == 403 and token in ((load_table(tid) or {}).get("room") or {}).get("watchers", {}):
+                return jsonify({"ok": False, "error": "观战票不能 ping"}), 403
+            return jsonify({"ok": False, "error": err[0], "gone": err[1] == 404}), err[1]
+        if t["room"]:
+            if room_housekeep(t) == "delete":
+                delete_table(tid)
+                return jsonify({"ok": False, "error": "房间已解散", "gone": True}), 410
+            if t["phase"] == "waiting":
+                if token not in t["tokens"]:      # 自己刚被超时释放
+                    save_room(t)
+                    return jsonify({"ok": False, "error": "你的座位因长时间没响应已释放", "gone": True}), 410
+                t["room"]["seats"][s]["last_seen"] = time.time()
+                save_room(t)
+                return jsonify({"ok": True, "autoplay_in_sec": None, "fp": None, "phase": "waiting", "step": None})
+        g = t["state"]
+        apply_timeouts(g)
+        touch_player(g, s, reconnected=True)
+        E.run_bots(g, limit=5000)
+        if t["room"]:
+            room_housekeep(t)
+            save_room(t)
+        else:
+            save_table(tid, g)
+        return jsonify({"ok": True, "autoplay_in_sec": autoplay_in_sec(g, s), "fp": state_fp(g),
+                        "phase": g["phase"], "step": g["step"]})
 
 
 ACT_MEMO_MAX = 64
@@ -2189,7 +2236,7 @@ li{margin:3px 0}
 <div class="toc">
  <a href="#base">基本约定</a><a href="#flow">完整流程</a><a href="#tiles">牌的编码</a><a href="#lobby">大厅</a>
  <a href="#join">入座</a><a href="#wait">候场</a><a href="#state">state</a><a href="#actions">可选动作</a>
- <a href="#act">act</a><a href="#timeout">托管</a>
+ <a href="#act">act</a><a href="#ping">ping</a><a href="#timeout">托管</a>
  <a href="#over">终局</a><a href="#watch">观战</a><a href="#errors">错误码</a><a href="#curl">curl 全流程</a>
 </div>
 
@@ -2210,7 +2257,7 @@ li{margin:3px 0}
 <li><b>打牌</b>：轮询 <code>GET /api/state</code>；<code>available_actions</code> 非空时，挑一个 <code>POST /api/act</code>。</li>
 <li><b>终局</b>：<code>phase:"over"</code>，看 <code>scores</code> 和 <code>over_reason</code>，停止轮询。</li>
 </ol>
-<div class="note">轮询间隔建议 1～3 秒。<b>任何一次 state / act 请求都算心跳</b>；小机/API 座连续 __MACHINE_T__ 秒没有请求会被笨机托管（见 <a href="#timeout">托管</a>）。</div>
+<div class="note">轮询间隔建议 1～3 秒。<b>任何一次 state / act / ping 请求都算心跳</b>；小机/API 座连续 __MACHINE_T__ 秒没有请求会被笨机托管（见 <a href="#timeout">托管</a>）。</div>
 
 <h2 id="tiles">牌的编码</h2>
 <p>一张牌 = 点数 + 花色字母：<code>w</code>=万、<code>t</code>=条、<code>o</code>=筒。例：<code>1w</code>=一万、<code>5t</code>=五条、<code>9o</code>=九筒。共 108 张（三门各 1～9 × 4），无字牌。手牌按 万→条→筒、点数升序排好。</p>
@@ -2270,7 +2317,7 @@ li{margin:3px 0}
 <tr><td><code>POST /api/start</code></td><td><code>{room, token}</code></td><td>仅房主，且在座者都已准备；空座由笨机补。返回开局后的本座视角</td></tr>
 </table></div>
 <ul>
-<li>候场 __WAIT_SEAT__ 秒没有心跳（state / ready）会释放座位，旧 token 之后返回 410 + <code>gone:true</code>。</li>
+<li>候场 __WAIT_SEAT__ 秒没有心跳（state / ready / ping）会释放座位，旧 token 之后返回 410 + <code>gone:true</code>。</li>
 <li>四座全准备 → 3 秒倒计时自动开局。房主离开自动转给最早入座者。候场 30 分钟没开局解散；终局 30 分钟后清理。</li>
 <li>开局后同一个 state 请求直接变成牌局视角，不用换地址。</li>
 </ul>
@@ -2338,6 +2385,17 @@ li{margin:3px 0}
 </ol>
 <div class="note">推荐做法：每次 act 带新的 <code>request_id</code>；网络异常时用<b>同一个</b> request_id 原样重发。</div>
 
+<h2 id="ping">POST /api/ping（显式心跳）</h2>
+<p><span class="m">POST</span><code>/api/ping</code> <code>{table, token, seat?}</code><br>
+只续本座心跳（解除/延后托管），不返回牌局：</p>
+<pre><code>{"ok":true, "autoplay_in_sec":90, "fp":"play-discard-2-...", "phase":"play", "step":"discard"}</code></pre>
+<ul>
+<li>候场时也能用（续候场心跳），此时 <code>phase:"waiting"</code>，<code>fp</code> / <code>step</code> / <code>autoplay_in_sec</code> 为 null。</li>
+<li>已被托管的座位 ping 一下就解除托管，接管当前局面。</li>
+<li>观战票不能 ping（403）。</li>
+<li>思考很久（比如在想一手牌）时可以用它保活；平时轮询 state 本身就是心跳，不需要额外 ping。</li>
+</ul>
+
 <h2 id="timeout">托管与断线</h2>
 <div class="tw"><table><tr><th>座位类型</th><th>多久没请求被托管</th></tr>
 <tr><td>真人座（human）</td><td>__PLAYER_T__ 秒</td></tr>
@@ -2345,7 +2403,7 @@ li{margin:3px 0}
 <tr><td>开局后（以及开局后用同一身份重新 join）</td><td>前 __GRACE__ 秒无论如何不托管</td></tr>
 </table></div>
 <ul>
-<li>state / act 任何一次请求都算心跳。托管后由笨机替你打；用原 token 再请求一次（state/act 均可）就解除托管，接管当前座位。</li>
+<li>state / act / ping 任何一次请求都算心跳。托管后由笨机替你打；用原 token 再请求一次（state/act/ping 均可）就解除托管，接管当前座位。</li>
 <li><code>autoplay_in_sec</code> 告诉你离被托管还剩几秒；被托管的座位 <code>players[].autoplay</code> 为 true，牌局日志也会记一笔。</li>
 <li>丢了 token：用同一个 <code>ident</code> 再 <code>POST /api/join</code> 同一房，拿回原座原 token。</li>
 </ul>
@@ -2364,7 +2422,7 @@ li{margin:3px 0}
 <ul>
 <li>读：<code>GET /api/state?table=&lt;房号&gt;&amp;watch=&lt;watch&gt;[&amp;seat=0..3]</code>，<code>spectator:true</code>。能看到所有人的 <code>hand_count</code>、弃牌、副露、流水、分数；<b>任何人的手牌都不返回</b>（<code>hand</code> 为空、<code>available_actions</code> 为空，定缺阶段缺门不公开）。<code>seat</code> 只是换底边视角。</li>
 <li>网页：<code>/mj/w/&lt;房号&gt;/&lt;watch&gt;</code> 只读牌桌。</li>
-<li>观战票拿去 act / ready / leave 一律 403。</li>
+<li>观战票拿去 act / ready / leave / ping 一律 403。</li>
 </ul>
 
 <h2 id="errors">常见错误码</h2>
@@ -2404,6 +2462,9 @@ curl -s -H "$UA" -H "$J" -X POST $B/api/act \
   -d '{"table":"'$R'","token":"'$T'","action":"discard","tile":"5t","fp":"&lt;fp&gt;","request_id":"r-002"}'
 curl -s -H "$UA" -H "$J" -X POST $B/api/act \
   -d '{"table":"'$R'","token":"'$T'","action":"pass","fp":"&lt;fp&gt;","request_id":"r-003"}'
+
+# 6. 想得久时保活
+curl -s -H "$UA" -H "$J" -X POST $B/api/ping -d '{"table":"'$R'","token":"'$T'"}'
 
 # 7. 观战
 curl -s -H "$UA" -H "$J" -X POST $B/api/watch -d '{"room":"123456"}'</code></pre>

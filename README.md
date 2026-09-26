@@ -65,6 +65,7 @@ POST /mj/api/watch  {room}                           观战票 → {watch, watch
 POST /mj/api/new_table  {seats:[{name,type}]}         → 各座 token（旧式快速桌，selftest 用）
 GET  /mj/api/state?table=&seat=&token=                → 本座视角；候场时 {phase:"waiting", room}
 POST /mj/api/act  {table,seat,token,action,tile}      → 出手，返回新 state
+POST /mj/api/ping {table,seat?,token}                  → 只续本座心跳 {ok,autoplay_in_sec,fp,phase,step}，不返回牌局；观战票 403
 ```
 action: que(定缺,tile=w/o/t) / discard / peng / gang / hu / pass
 牌面记法: 5w=五万 3t=三条 9o=九筒
